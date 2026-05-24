@@ -1,2 +1,3 @@
-# server
-Server side of GoPort
+# Server
+
+Hello world Go HTTP server.
