@@ -16,9 +16,9 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            cd ~/personal/GoPort/server
+            cd ~/personal/GoPort
             git pull origin main
-            cd ..
+            git submodule update --init --remote --recursive
             docker-compose build --no-cache server
             docker-compose stop server || true
             docker-compose rm -f server || true
