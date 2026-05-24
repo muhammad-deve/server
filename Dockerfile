@@ -1,15 +1,14 @@
 FROM golang:1.23-alpine AS build
 WORKDIR /app
 
-# Cache go modules
+# Cache go modules (go.sum is created by tidy if missing)
 COPY go.mod ./
-COPY go.su[m] ./
 RUN go mod download || true
 
 # Copy everything else
 COPY . .
 
-# Tidy in case go.sum is missing or stale
+# Tidy ensures go.sum is in sync with go.mod
 RUN go mod tidy
 
 # Build: prefer ./cmd/server, fallback to ./cmd, fallback to root
