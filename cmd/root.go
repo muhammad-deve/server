@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 
+	"github.com/muhammad-deve/server/cmd/config"
 	"github.com/spf13/cobra"
 )
 
@@ -15,4 +16,8 @@ func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func init() {
+	config.Load()
 }
