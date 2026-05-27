@@ -9,7 +9,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy server to server
+      - name: Sync server submodule
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -18,8 +18,6 @@ jobs:
           script: |
             cd ~/personal/GoPort
             git pull origin main
-            git submodule update --init --remote --recursive
-            docker-compose build --no-cache server
-            docker-compose stop server || true
-            docker-compose rm -f server || true
-            docker-compose up -d --no-deps server
+            git submodule sync -- server
+            git submodule update --init --remote server
+            docker rm -f goport-server || true
