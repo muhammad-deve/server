@@ -27,6 +27,7 @@ type registrationRequest struct {
 type registrationResponse struct {
 	Subdomain string `json:"subdomain"`
 	URL       string `json:"url"`
+	Error     string `json:"error,omitempty"`
 }
 
 func Start(cfg Config) {
@@ -50,6 +51,14 @@ func Start(cfg Config) {
 	var resp registrationResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		fmt.Println("error reading tunnel response:", err)
+		return
+	}
+	if resp.Error != "" {
+		fmt.Println("server error:", resp.Error)
+		return
+	}
+	if resp.URL == "" {
+		fmt.Println("server error: empty tunnel url")
 		return
 	}
 
@@ -84,7 +93,7 @@ func printDashboard(cfg Config, resp registrationResponse, latency time.Duration
 	fmt.Printf("%-20s %s\n", "Dashboard", "http://127.0.0.1:4040")
 	fmt.Printf("%-20s %s\n", "Region", regionLabel(cfg.Region))
 	fmt.Printf("%-20s online (%dms)\n", "Status", latency.Milliseconds())
-	fmt.Printf("%-20s %s -> goport:%s\n\n", "Forwarding", resp.URL, cfg.Port)
+	fmt.Printf("%-20s %s -> localhost:%s\n\n", "Forwarding", resp.URL, cfg.Port)
 
 	if cfg.Type == "http" {
 		fmt.Println("HTTP Requests")
