@@ -390,6 +390,10 @@ func logRequest(method, path string, statusCode int, statusText string) {
 
 func printDashboard(cfg Config, resp registrationResponse, latency time.Duration, dashboardPort int) {
 	dashboardAddr := "http://127.0.0.1:" + strconv.Itoa(dashboardPort)
+	// Clear the entire terminal (visible + scrollback) and reprint the command at
+	// the top so the dashboard sits cleanly without any prior shell output above it.
+	fmt.Print("\033[H\033[2J\033[3J")
+	fmt.Printf("%s$%s %sgoport %s %s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, cfg.Type, cfg.Port, ansiReset)
 	fmt.Println()
 	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, dashboardAddr, ansiReset)
 	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Region", ansiReset, ansiBold+ansiWhite, regionLabel(cfg.Region), ansiReset)
