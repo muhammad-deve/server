@@ -2,12 +2,16 @@ package tunnel
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -73,7 +77,22 @@ func Start(cfg Config) {
 		return
 	}
 
-	printDashboard(cfg, resp, time.Since(start))
+	state, dashboardPort, dashErr := startDashboard(cfg.Port)
+	if dashErr != nil {
+		fmt.Println("warning: could not start dashboard:", dashErr)
+	}
+	latency := time.Since(start)
+	if state != nil {
+		state.setTunnel(tunnelInfo{
+			URL:     resp.URL,
+			Status:  "online",
+			Region:  regionLabel(cfg.Region),
+			Latency: latency.Milliseconds(),
+			Started: time.Now(),
+		})
+	}
+
+	printDashboard(cfg, resp, latency, dashboardPort)
 
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
@@ -90,7 +109,7 @@ func Start(cfg Config) {
 				done <- err
 				return
 			}
-			go handleStream(stream, cfg.Port)
+			go handleStream(stream, cfg.Port, state)
 		}
 	}()
 
@@ -107,42 +126,238 @@ func Start(cfg Config) {
 	}
 }
 
-func handleStream(stream net.Conn, port string) {
+func handleStream(stream net.Conn, port string, state *dashboardState) {
 	defer stream.Close()
+	startTime := time.Now()
 
-	req, err := http.ReadRequest(bufio.NewReader(stream))
+	bufStream := bufio.NewReader(stream)
+	req, err := http.ReadRequest(bufStream)
 	if err != nil {
-		fmt.Fprintf(stream, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to read request: %v", err)
+		writeError(stream, http.StatusBadRequest, fmt.Sprintf("failed to read request: %v", err))
 		return
 	}
 	defer req.Body.Close()
 
-	localConn, err := net.Dial("tcp", "127.0.0.1:"+port)
+	// Buffer the request body so we can both forward it and capture it for the dashboard.
+	// Read the full body so uploads aren't truncated; we only truncate the stored copy.
+	var reqBodyBytes []byte
+	if req.Body != nil && req.Body != http.NoBody {
+		reqBodyBytes, _ = io.ReadAll(req.Body)
+	}
+	reqHeaders := flattenHeaders(req.Header)
+	method := req.Method
+	pathStr := req.URL.RequestURI()
+
+	localAddr := "127.0.0.1:" + port
+	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
-		logRequest(req.Method, req.URL.RequestURI(), http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
-		fmt.Fprintf(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to connect to localhost:%s: %v", port, err)
+		logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
+		captureFailed(state, method, pathStr, reqHeaders, reqBodyBytes, http.StatusBadGateway, fmt.Sprintf("failed to connect to %s: %v", localAddr, err), time.Since(startTime))
+		writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to connect to %s: %v", localAddr, err))
 		return
 	}
 	defer localConn.Close()
 
+	// Rewrite request so the local server sees a normal localhost request.
+	req.Host = localAddr
+	req.URL.Host = localAddr
+	req.URL.Scheme = "http"
+	req.RequestURI = ""
+
+	// Strip hop-by-hop headers before forwarding.
+	stripHopByHop(req.Header)
+
+	// Restore the body we buffered so req.Write can resend it.
+	if reqBodyBytes != nil {
+		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+		req.ContentLength = int64(len(reqBodyBytes))
+	}
+
+	// Detect Upgrade requests (e.g. WebSocket) and run a raw bidirectional copy.
+	if isUpgrade(req) {
+		if err := req.Write(localConn); err != nil {
+			logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
+			writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to forward upgrade request: %v", err))
+			return
+		}
+		logRequest(method, pathStr, http.StatusSwitchingProtocols, "Upgrade")
+		// Splice any data already buffered in bufStream first, then continue copying both ways.
+		if n := bufStream.Buffered(); n > 0 {
+			if buf, err := bufStream.Peek(n); err == nil {
+				_, _ = localConn.Write(buf)
+			}
+		}
+		bidirectionalCopy(stream, localConn)
+		return
+	}
+
 	if err := req.Write(localConn); err != nil {
-		logRequest(req.Method, req.URL.RequestURI(), http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
-		fmt.Fprintf(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to forward request: %v", err)
+		logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
+		captureFailed(state, method, pathStr, reqHeaders, reqBodyBytes, http.StatusBadGateway, fmt.Sprintf("failed to forward: %v", err), time.Since(startTime))
+		writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to forward request: %v", err))
 		return
 	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(localConn), req)
 	if err != nil {
-		logRequest(req.Method, req.URL.RequestURI(), http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
-		fmt.Fprintf(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to read local response: %v", err)
+		logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
+		captureFailed(state, method, pathStr, reqHeaders, reqBodyBytes, http.StatusBadGateway, fmt.Sprintf("failed to read response: %v", err), time.Since(startTime))
+		writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to read local response: %v", err))
 		return
 	}
 	defer resp.Body.Close()
 
-	logRequest(req.Method, req.URL.RequestURI(), resp.StatusCode, http.StatusText(resp.StatusCode))
-	if err := resp.Write(stream); err != nil {
-		fmt.Println("error writing tunnel response:", err)
+	// Buffer the response body so we can both forward it and capture it.
+	// Read the full body so the browser receives intact assets; truncate only the stored copy.
+	respBodyBytes, _ := io.ReadAll(resp.Body)
+	logRequest(method, pathStr, resp.StatusCode, http.StatusText(resp.StatusCode))
+
+	if state != nil {
+		state.store.Add(&CapturedRequest{
+			ID:         newRequestID(),
+			Timestamp:  startTime,
+			Method:     method,
+			Path:       pathStr,
+			StatusCode: resp.StatusCode,
+			Duration:   time.Since(startTime).Milliseconds(),
+			ReqHeaders: reqHeaders,
+			ReqBody:    truncateBody(reqBodyBytes),
+			ResHeaders: flattenHeaders(resp.Header),
+			ResBody:    truncateBody(respBodyBytes),
+		})
 	}
+
+	stripHopByHop(resp.Header)
+	resp.Close = true
+	resp.Header.Set("Connection", "close")
+	resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
+	resp.ContentLength = int64(len(respBodyBytes))
+
+	if err := resp.Write(stream); err != nil {
+		// Don't print on broken pipe / closed connection — these are normal when the client disconnects.
+		if !isClosedConnErr(err) {
+			fmt.Println("error writing tunnel response:", err)
+		}
+	}
+}
+
+func captureFailed(state *dashboardState, method, path string, reqHeaders map[string]string, reqBody []byte, statusCode int, message string, dur time.Duration) {
+	if state == nil {
+		return
+	}
+	state.store.Add(&CapturedRequest{
+		ID:         newRequestID(),
+		Timestamp:  time.Now().Add(-dur),
+		Method:     method,
+		Path:       path,
+		StatusCode: statusCode,
+		Duration:   dur.Milliseconds(),
+		ReqHeaders: reqHeaders,
+		ReqBody:    truncateBody(reqBody),
+		ResHeaders: map[string]string{"Content-Type": "text/plain"},
+		ResBody:    message,
+	})
+}
+
+func writeError(w net.Conn, status int, body string) {
+	fmt.Fprintf(w,
+		"HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		status, http.StatusText(status), len(body), body,
+	)
+}
+
+func isUpgrade(req *http.Request) bool {
+	if !strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
+		!headerContainsToken(req.Header.Get("Connection"), "upgrade") {
+		return false
+	}
+	return req.Header.Get("Upgrade") != ""
+}
+
+func headerContainsToken(header, token string) bool {
+	for _, part := range strings.Split(header, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
+
+func bidirectionalCopy(a, b net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(a, b)
+		_ = closeWrite(a)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(b, a)
+		_ = closeWrite(b)
+		done <- struct{}{}
+	}()
+	<-done
+}
+
+func closeWrite(c net.Conn) error {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// hopByHopHeaders are headers that should not be forwarded by a proxy.
+// See RFC 7230 section 6.1 and RFC 2616 section 13.5.1.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func stripHopByHop(h http.Header) {
+	// Headers listed in Connection are also hop-by-hop.
+	if connection := h.Get("Connection"); connection != "" {
+		for _, name := range strings.Split(connection, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				h.Del(name)
+			}
+		}
+	}
+	for _, name := range hopByHopHeaders {
+		h.Del(name)
+	}
+}
+
+func isClosedConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "EOF")
+}
+
+// pathColumnWidth is the fixed column width for the request path in logRequest.
+// Paths longer than this are truncated with an ellipsis so the status column
+// stays vertically aligned, matching ngrok's behavior.
+const pathColumnWidth = 50
+
+func truncatePath(path string) string {
+	if len(path) <= pathColumnWidth {
+		return path
+	}
+	if pathColumnWidth <= 1 {
+		return "…"
+	}
+	return path[:pathColumnWidth-1] + "…"
 }
 
 func logRequest(method, path string, statusCode int, statusText string) {
@@ -154,14 +369,17 @@ func logRequest(method, path string, statusCode int, statusText string) {
 		statusColor = ansiGreen
 	}
 
+	displayPath := truncatePath(path)
+
 	fmt.Printf(
-		"%s%-10s %-7s%s %s%-32s%s %s%d %s%s\n",
+		"%s%-10s %-7s%s %s%-*s%s %s%d %s%s\n",
 		ansiGray,
 		time.Now().Format("15:04:05"),
 		method,
 		ansiReset,
 		ansiBold+ansiWhite,
-		path,
+		pathColumnWidth,
+		displayPath,
 		ansiReset,
 		statusColor,
 		statusCode,
@@ -170,10 +388,10 @@ func logRequest(method, path string, statusCode int, statusText string) {
 	)
 }
 
-func printDashboard(cfg Config, resp registrationResponse, latency time.Duration) {
-	fmt.Printf("\n%s$%s %sgoport %s %s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, cfg.Type, cfg.Port, ansiReset)
+func printDashboard(cfg Config, resp registrationResponse, latency time.Duration, dashboardPort int) {
+	dashboardAddr := "http://127.0.0.1:" + strconv.Itoa(dashboardPort)
 	fmt.Println()
-	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, "http://127.0.0.1:4040", ansiReset)
+	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, dashboardAddr, ansiReset)
 	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Region", ansiReset, ansiBold+ansiWhite, regionLabel(cfg.Region), ansiReset)
 	fmt.Printf("%s%-16s%s %sonline%s %s(%dms)%s\n", ansiGray, "Status", ansiReset, ansiGreen, ansiReset, ansiGray, latency.Milliseconds(), ansiReset)
 	fmt.Printf("%s%-16s%s %s%s%s %s→%s %s%slocalhost:%s%s\n", ansiGray, "Forwarding", ansiReset, ansiGreen, resp.URL, ansiReset, ansiGray, ansiReset, ansiBold, ansiWhite, cfg.Port, ansiReset)
