@@ -1,10 +1,11 @@
 package tunnel
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -31,6 +32,14 @@ type registrationResponse struct {
 	URL       string `json:"url"`
 	Error     string `json:"error,omitempty"`
 }
+
+const (
+	ansiReset = "\x1b[0m"
+	ansiBold  = "\x1b[1m"
+	ansiGray  = "\x1b[90m"
+	ansiGreen = "\x1b[38;2;48;242;148m"
+	ansiWhite = "\x1b[97m"
+)
 
 func Start(cfg Config) {
 	start := time.Now()
@@ -101,40 +110,79 @@ func Start(cfg Config) {
 func handleStream(stream net.Conn, port string) {
 	defer stream.Close()
 
-	localConn, err := net.Dial("tcp", "localhost:"+port)
+	req, err := http.ReadRequest(bufio.NewReader(stream))
 	if err != nil {
+		fmt.Fprintf(stream, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to read request: %v", err)
+		return
+	}
+	defer req.Body.Close()
+
+	localConn, err := net.Dial("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		logRequest(req.Method, req.URL.RequestURI(), http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
 		fmt.Fprintf(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to connect to localhost:%s: %v", port, err)
 		return
 	}
 	defer localConn.Close()
 
-	errCh := make(chan error, 2)
-	go func() {
-		_, err := io.Copy(localConn, stream)
-		errCh <- err
-	}()
-	go func() {
-		_, err := io.Copy(stream, localConn)
-		errCh <- err
-	}()
-	<-errCh
+	if err := req.Write(localConn); err != nil {
+		logRequest(req.Method, req.URL.RequestURI(), http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
+		fmt.Fprintf(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to forward request: %v", err)
+		return
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(localConn), req)
+	if err != nil {
+		logRequest(req.Method, req.URL.RequestURI(), http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
+		fmt.Fprintf(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to read local response: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	logRequest(req.Method, req.URL.RequestURI(), resp.StatusCode, http.StatusText(resp.StatusCode))
+	if err := resp.Write(stream); err != nil {
+		fmt.Println("error writing tunnel response:", err)
+	}
+}
+
+func logRequest(method, path string, statusCode int, statusText string) {
+	if statusText == "" {
+		statusText = "status"
+	}
+	statusColor := ansiGray
+	if statusCode >= 200 && statusCode < 300 {
+		statusColor = ansiGreen
+	}
+
+	fmt.Printf(
+		"%s%-10s %-7s%s %s%-32s%s %s%d %s%s\n",
+		ansiGray,
+		time.Now().Format("15:04:05"),
+		method,
+		ansiReset,
+		ansiBold+ansiWhite,
+		path,
+		ansiReset,
+		statusColor,
+		statusCode,
+		statusText,
+		ansiReset,
+	)
 }
 
 func printDashboard(cfg Config, resp registrationResponse, latency time.Duration) {
-	domain := "goport.uz"
-	if config.Domain != "" && config.Domain != "goport" {
-		domain = config.Domain
-	}
-
-	fmt.Printf("You can find it in %s\n\n", domain)
-	fmt.Printf("%-20s %s\n", "Dashboard", "http://127.0.0.1:4040")
-	fmt.Printf("%-20s %s\n", "Region", regionLabel(cfg.Region))
-	fmt.Printf("%-20s online (%dms)\n", "Status", latency.Milliseconds())
-	fmt.Printf("%-20s %s -> localhost:%s\n\n", "Forwarding", resp.URL, cfg.Port)
+	fmt.Printf("\n%s$%s %sgoport %s %s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, cfg.Type, cfg.Port, ansiReset)
+	fmt.Println()
+	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, "http://127.0.0.1:4040", ansiReset)
+	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Region", ansiReset, ansiBold+ansiWhite, regionLabel(cfg.Region), ansiReset)
+	fmt.Printf("%s%-16s%s %sonline%s %s(%dms)%s\n", ansiGray, "Status", ansiReset, ansiGreen, ansiReset, ansiGray, latency.Milliseconds(), ansiReset)
+	fmt.Printf("%s%-16s%s %s%s%s %s→%s %s%slocalhost:%s%s\n", ansiGray, "Forwarding", ansiReset, ansiGreen, resp.URL, ansiReset, ansiGray, ansiReset, ansiBold, ansiWhite, cfg.Port, ansiReset)
+	fmt.Println()
 
 	if cfg.Type == "http" {
-		fmt.Println("HTTP Requests")
-		fmt.Println("-------------")
+		fmt.Printf("%s%sHTTP Requests%s\n", ansiBold, ansiWhite, ansiReset)
+		fmt.Printf("%s-------------%s\n", ansiGray, ansiReset)
+		fmt.Println()
 	}
 }
 

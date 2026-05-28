@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/muhammad-deve/server/tunnel"
 	"github.com/spf13/cobra"
 )
@@ -13,7 +11,6 @@ var tcpCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		port := args[0]
-		fmt.Println("starting TCP tunnel for port", port)
 		tunnel.Start(tunnel.Config{
 			Port: port,
 			Type: "tcp",
