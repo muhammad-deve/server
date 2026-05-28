@@ -3,12 +3,14 @@ package tunnel
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/muhammad-deve/server/cmd/config"
 )
 
@@ -64,11 +66,23 @@ func Start(cfg Config) {
 
 	printDashboard(cfg, resp, time.Since(start))
 
+	session, err := yamux.Client(conn, nil)
+	if err != nil {
+		fmt.Println("error starting tunnel session:", err)
+		return
+	}
+	defer session.Close()
+
 	done := make(chan error, 1)
 	go func() {
-		buf := make([]byte, 1)
-		_, err := conn.Read(buf)
-		done <- err
+		for {
+			stream, err := session.Accept()
+			if err != nil {
+				done <- err
+				return
+			}
+			go handleStream(stream, cfg.Port)
+		}
 	}()
 
 	interrupt := make(chan os.Signal, 1)
@@ -78,9 +92,32 @@ func Start(cfg Config) {
 	select {
 	case <-interrupt:
 		fmt.Println("\nstopping tunnel")
+		session.Close()
 	case err := <-done:
 		fmt.Println("server closed connection:", err)
 	}
+}
+
+func handleStream(stream net.Conn, port string) {
+	defer stream.Close()
+
+	localConn, err := net.Dial("tcp", "localhost:"+port)
+	if err != nil {
+		fmt.Fprintf(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nfailed to connect to localhost:%s: %v", port, err)
+		return
+	}
+	defer localConn.Close()
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(localConn, stream)
+		errCh <- err
+	}()
+	go func() {
+		_, err := io.Copy(stream, localConn)
+		errCh <- err
+	}()
+	<-errCh
 }
 
 func printDashboard(cfg Config, resp registrationResponse, latency time.Duration) {
