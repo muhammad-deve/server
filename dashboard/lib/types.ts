@@ -27,4 +27,5 @@ export interface TunnelData {
   latency: number
   requestsToday: number
   totalBytes: number
+  version: string
 }

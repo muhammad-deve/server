@@ -31,6 +31,7 @@ interface RawTunnelInfo {
   latency: number
   requestsToday: number
   totalBytes: number
+  version: string
   started: string
 }
 
@@ -71,6 +72,7 @@ export async function fetchTunnel(): Promise<TunnelData> {
     latency: raw.latency || 0,
     requestsToday: raw.requestsToday || 0,
     totalBytes: raw.totalBytes || 0,
+    version: raw.version || "",
   }
 }
 

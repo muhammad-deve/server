@@ -4,12 +4,14 @@ import (
 	"os"
 
 	"github.com/muhammad-deve/server/cmd/config"
+	"github.com/muhammad-deve/server/tunnel"
 	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "goport",
-	Short: "Expose your localhost to the internet",
+	Use:     "goport",
+	Short:   "Expose your localhost to the internet",
+	Version: tunnel.Version,
 }
 
 func Execute() {
