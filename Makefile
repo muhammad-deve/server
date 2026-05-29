@@ -1,4 +1,4 @@
-PORT ?= 8080
+PORT ?= 8090
 
 run:
 	go run . http $(PORT)

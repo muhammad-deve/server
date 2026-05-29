@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -92,10 +91,12 @@ func Start(cfg Config) {
 		})
 	}
 
-	printDashboard(cfg, resp, latency, dashboardPort)
+	startTerminalUI(cfg, resp, latency, dashboardPort)
+	defer stopTerminalUI()
 
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
+		stopTerminalUI()
 		fmt.Println("error starting tunnel session:", err)
 		return
 	}
@@ -119,9 +120,9 @@ func Start(cfg Config) {
 
 	select {
 	case <-interrupt:
-		fmt.Println("\nstopping tunnel")
 		session.Close()
 	case err := <-done:
+		stopTerminalUI()
 		fmt.Println("server closed connection:", err)
 	}
 }
@@ -345,7 +346,7 @@ func isClosedConnErr(err error) bool {
 		strings.Contains(msg, "EOF")
 }
 
-// pathColumnWidth is the fixed column width for the request path in logRequest.
+// pathColumnWidth is the fixed column width for the request path in terminal logs.
 // Paths longer than this are truncated with an ellipsis so the status column
 // stays vertically aligned, matching ngrok's behavior.
 const pathColumnWidth = 50
@@ -364,32 +365,27 @@ func logRequest(method, path string, statusCode int, statusText string) {
 	if statusText == "" {
 		statusText = "status"
 	}
-	statusColor := ansiGray
-	if statusCode >= 200 && statusCode < 300 {
-		statusColor = ansiGreen
+	line := terminalRequestLine{
+		Time:       time.Now(),
+		Method:     method,
+		Path:       path,
+		StatusCode: statusCode,
+		StatusText: statusText,
 	}
 
-	displayPath := truncatePath(path)
+	terminalUIMu.RLock()
+	ui := activeTerminalUI
+	terminalUIMu.RUnlock()
+	if ui != nil {
+		ui.add(line)
+		return
+	}
 
-	fmt.Printf(
-		"%s%-10s %-7s%s %s%-*s%s %s%d %s%s\n",
-		ansiGray,
-		time.Now().Format("15:04:05"),
-		method,
-		ansiReset,
-		ansiBold+ansiWhite,
-		pathColumnWidth,
-		displayPath,
-		ansiReset,
-		statusColor,
-		statusCode,
-		statusText,
-		ansiReset,
-	)
+	printRequestLine(line)
 }
 
 func printDashboard(cfg Config, resp registrationResponse, latency time.Duration, dashboardPort int) {
-	dashboardAddr := "http://127.0.0.1:" + strconv.Itoa(dashboardPort)
+	dashboardAddr := fmt.Sprintf("http://127.0.0.1:%d", dashboardPort)
 	// Clear the entire terminal (visible + scrollback) and reprint the command at
 	// the top so the dashboard sits cleanly without any prior shell output above it.
 	fmt.Print("\033[H\033[2J\033[3J")
