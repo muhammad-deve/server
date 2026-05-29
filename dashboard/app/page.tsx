@@ -54,14 +54,15 @@ export default function Dashboard() {
     }
   }, [])
 
-  // Live stream new requests via SSE.
+  // Live stream new requests via SSE. This is the single source of truth for
+  // the list: every captured request (including replays) arrives here exactly
+  // once, and we dedupe by id so nothing shows up twice.
   useEffect(() => {
     const teardown = subscribeRequests((req) => {
       setRequests((prev) => {
-        if (prev.find((r) => r.id === req.id)) return prev
+        if (prev.some((r) => r.id === req.id)) return prev
         return [req, ...prev].slice(0, 500)
       })
-      setTunnel((prev) => ({ ...prev, requestsToday: prev.requestsToday + 1 }))
     })
     return teardown
   }, [])
@@ -90,8 +91,11 @@ export default function Dashboard() {
 
   const handleReplay = useCallback(async (request: HttpRequest) => {
     try {
-      const replayed = await apiReplayRequest(request.id)
-      setRequests((prev) => [replayed, ...prev].slice(0, 500))
+      // The replayed request is captured server-side and pushed back over the
+      // SSE stream, which appends it (deduped) just like any other request.
+      // So we only trigger the replay here and let the stream update the list,
+      // avoiding a duplicate row.
+      await apiReplayRequest(request.id)
     } catch (err) {
       console.error("replay failed", err)
     }
@@ -99,15 +103,13 @@ export default function Dashboard() {
 
   return (
     <div className="flex min-h-screen bg-[var(--goport-bg)]">
-      <Sidebar tunnelData={tunnel} />
+      <Sidebar tunnelData={{ ...tunnel, requestsToday: requests.length }} />
 
       <main className="flex-1 flex flex-col overflow-hidden">
         <TopBar
-          tunnelUrl={tunnel.url}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onClearRequests={handleClearRequests}
-          requestCount={filteredRequests.length}
         />
 
         <RequestsTable requests={filteredRequests} onReplay={handleReplay} tunnelUrl={tunnel.url} />

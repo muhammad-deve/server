@@ -2,23 +2,18 @@
 
 import { useState, useEffect } from "react"
 import { useTheme } from "next-themes"
-import { Search, Trash2, ExternalLink, Sun, Moon } from "lucide-react"
-import { CopyButton } from "./copy-button"
+import { Search, Trash2, Sun, Moon } from "lucide-react"
 
 interface TopBarProps {
-  tunnelUrl: string
   searchQuery: string
   onSearchChange: (query: string) => void
   onClearRequests: () => void
-  requestCount: number
 }
 
 export function TopBar({ 
-  tunnelUrl, 
   searchQuery, 
   onSearchChange, 
   onClearRequests,
-  requestCount 
 }: TopBarProps) {
   const { theme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
@@ -29,43 +24,21 @@ export function TopBar({
   }, [])
 
   return (
-    <header className="h-14 bg-[var(--goport-bg-secondary)] border-b border-[var(--goport-border)] flex items-center justify-between px-5">
-      {/* Tunnel URL Display */}
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-3 px-3 py-1.5 rounded-md bg-[var(--goport-bg-tertiary)] border border-[var(--goport-border)]">
-          <div className="w-1.5 h-1.5 rounded-full bg-[var(--goport-success)]"></div>
-          <code className="text-sm text-[var(--goport-text-secondary)] font-mono">
-            {tunnelUrl}
-          </code>
-          <CopyButton text={tunnelUrl} />
-          <a
-            href={tunnelUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="p-1 rounded hover:bg-[var(--goport-border)] transition-colors"
-          >
-            <ExternalLink className="w-3.5 h-3.5 text-[var(--goport-text-muted)] hover:text-[var(--goport-text-secondary)]" />
-          </a>
-        </div>
-        <span className="text-xs text-[var(--goport-text-muted)]">
-          {requestCount} request{requestCount !== 1 ? 's' : ''}
-        </span>
+    <header className="h-14 bg-[var(--goport-bg-secondary)] border-b border-[var(--goport-border)] flex items-center justify-between gap-4 px-5">
+      {/* Search Bar */}
+      <div className="relative flex-1 max-w-md">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--goport-text-muted)]" />
+        <input
+          type="text"
+          placeholder="Filter by path, status, or method..."
+          value={searchQuery}
+          onChange={(e) => onSearchChange(e.target.value)}
+          className="w-full pl-9 pr-3 py-1.5 rounded-md bg-[var(--goport-bg-tertiary)] border border-[var(--goport-border)] text-sm text-[var(--goport-text-secondary)] placeholder:text-[var(--goport-text-muted)] focus:outline-none focus:border-[var(--goport-border-subtle)] transition-colors font-mono"
+        />
       </div>
 
-      {/* Search and Actions */}
+      {/* Actions */}
       <div className="flex items-center gap-2">
-        {/* Search Bar */}
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--goport-text-muted)]" />
-          <input
-            type="text"
-            placeholder="Filter by path, status, or method..."
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            className="w-64 pl-9 pr-3 py-1.5 rounded-md bg-[var(--goport-bg-tertiary)] border border-[var(--goport-border)] text-sm text-[var(--goport-text-secondary)] placeholder:text-[var(--goport-text-muted)] focus:outline-none focus:border-[var(--goport-border-subtle)] transition-colors font-mono"
-          />
-        </div>
-
         {/* Clear Button */}
         <button
           onClick={onClearRequests}

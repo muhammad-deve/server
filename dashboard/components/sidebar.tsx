@@ -1,6 +1,6 @@
 "use client"
 
-import { Globe, Activity, MapPin, Gauge, BarChart3 } from "lucide-react"
+import { Globe, MapPin, Gauge, BarChart3, ExternalLink } from "lucide-react"
 import { CopyButton } from "./copy-button"
 import { TunnelData } from "@/lib/types"
 
@@ -48,30 +48,33 @@ export function Sidebar({ tunnelData }: SidebarProps) {
             <span className="text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Tunnel URL</span>
           </div>
           <div className="flex items-center gap-2">
-            <code className="text-xs text-[var(--goport-text-secondary)] truncate flex-1 font-mono">
-              {displayUrl}
-            </code>
-            {tunnelData.url ? <CopyButton text={tunnelData.url} /> : null}
-          </div>
-        </div>
-
-        {/* Status */}
-        <div className="p-3 rounded-lg bg-[var(--goport-bg-tertiary)] border border-[var(--goport-border)]">
-          <div className="flex items-center gap-2 mb-2">
-            <Activity className="w-3.5 h-3.5 text-[var(--goport-text-muted)]" />
-            <span className="text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Status</span>
-          </div>
-          <div className="flex items-center gap-2">
             <div
-              className={`w-2 h-2 rounded-full ${
+              className={`w-2 h-2 rounded-full shrink-0 ${
                 tunnelData.status === "online"
                   ? "bg-[var(--goport-success)] animate-pulse-dot"
                   : tunnelData.status === "connecting"
                   ? "bg-[var(--goport-warning)] animate-pulse-dot"
                   : "bg-[var(--goport-error)]"
               }`}
+              title={tunnelData.status}
             ></div>
-            <span className="text-sm text-[var(--goport-text-secondary)] capitalize">{tunnelData.status}</span>
+            <code className="text-xs text-[var(--goport-text-secondary)] truncate flex-1 font-mono">
+              {displayUrl}
+            </code>
+            {tunnelData.url ? (
+              <>
+                <CopyButton text={tunnelData.url} />
+                <a
+                  href={tunnelData.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-1 rounded hover:bg-[var(--goport-border)] transition-colors"
+                  aria-label="Open tunnel URL"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-[var(--goport-text-muted)] hover:text-[var(--goport-text-secondary)]" />
+                </a>
+              </>
+            ) : null}
           </div>
         </div>
 
