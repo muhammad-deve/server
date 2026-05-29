@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-const terminalRequestRows = 14
-
 type terminalRequestLine struct {
 	Time       time.Time
 	Method     string
@@ -24,8 +22,7 @@ type terminalUI struct {
 	resp          registrationResponse
 	latency       time.Duration
 	dashboardPort int
-	requests      []terminalRequestLine
-	requestStart  int
+	started       bool
 	stopped       bool
 }
 
@@ -41,7 +38,6 @@ func startTerminalUI(cfg Config, resp registrationResponse, latency time.Duratio
 		resp:          resp,
 		latency:       latency,
 		dashboardPort: dashboardPort,
-		requests:      make([]terminalRequestLine, 0, terminalRequestRows),
 	}
 
 	terminalUIMu.Lock()
@@ -64,6 +60,9 @@ func stopTerminalUI() {
 	}
 }
 
+// add appends a new request line at the bottom of the stream. Because we render
+// to the normal screen buffer (no alternate buffer, no in-place redraw), the
+// terminal's native scrollback keeps every line and stays scrollable.
 func (ui *terminalUI) add(line terminalRequestLine) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
@@ -72,56 +71,29 @@ func (ui *terminalUI) add(line terminalRequestLine) {
 		return
 	}
 
-	ui.requests = append(ui.requests, terminalRequestLine{})
-	copy(ui.requests[1:], ui.requests[:len(ui.requests)-1])
-	ui.requests[0] = line
-	if len(ui.requests) > terminalRequestRows {
-		ui.requests = ui.requests[:terminalRequestRows]
-	}
-
-	ui.renderLocked()
-}
-
-func (ui *terminalUI) render() {
-	ui.mu.Lock()
-	defer ui.mu.Unlock()
-	ui.renderLocked()
-}
-
-func (ui *terminalUI) renderLocked() {
-	if ui.stopped {
-		return
-	}
-
 	var out strings.Builder
-	if ui.requestStart == 0 {
-		header := buildTerminalDashboard(ui.cfg, ui.resp, ui.latency, ui.dashboardPort)
-		ui.requestStart = strings.Count(header, "\n") + 1
-		out.WriteString("\033[?1049h\033[?25l\033[H\033[2J")
-		out.WriteString(header)
-	} else {
-		fmt.Fprintf(&out, "\033[%d;1H\033[J", ui.requestStart)
-	}
-	writeRequestLines(&out, ui.visibleRequests())
-	out.WriteString("\033[H")
+	writeRequestLine(&out, line)
+	out.WriteByte('\n')
 	fmt.Print(out.String())
 }
 
-func (ui *terminalUI) visibleRequests() []terminalRequestLine {
-	_, height := terminalSize()
-	maxRows := terminalRequestRows
-	if ui.requestStart > 0 && height > 0 {
-		if rows := height - ui.requestStart; rows < maxRows {
-			maxRows = rows
-		}
+// render prints the dashboard header exactly once. Subsequent request lines are
+// streamed below it so the whole session lives in normal scrollback.
+func (ui *terminalUI) render() {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+
+	if ui.stopped || ui.started {
+		return
 	}
-	if maxRows < 0 {
-		maxRows = 0
-	}
-	if len(ui.requests) <= maxRows {
-		return ui.requests
-	}
-	return ui.requests[:maxRows]
+	ui.started = true
+
+	var out strings.Builder
+	// Clear the visible screen and scrollback for a clean start, then leave the
+	// terminal in the normal buffer so new output scrolls naturally.
+	out.WriteString("\033[H\033[2J\033[3J")
+	out.WriteString(buildTerminalDashboard(ui.cfg, ui.resp, ui.latency, ui.dashboardPort))
+	fmt.Print(out.String())
 }
 
 func (ui *terminalUI) clear() {
@@ -133,7 +105,9 @@ func (ui *terminalUI) clear() {
 	}
 
 	ui.stopped = true
-	fmt.Print("\033[?25h\033[H\033[2J\033[?1049l\033[H\033[2J\033[3J")
+	// Wipe the visible screen and the scrollback, then move the cursor home so
+	// the prompt returns to a clean terminal after Ctrl+C.
+	fmt.Print("\033[H\033[2J\033[3J")
 }
 
 func printRequestLine(req terminalRequestLine) {
@@ -148,15 +122,6 @@ func printRequestLine(req terminalRequestLine) {
 	writeRequestLine(&out, req)
 	out.WriteByte('\n')
 	fmt.Print(out.String())
-}
-
-func writeRequestLines(out *strings.Builder, requests []terminalRequestLine) {
-	for i, req := range requests {
-		if i > 0 {
-			out.WriteByte('\n')
-		}
-		writeRequestLine(out, req)
-	}
 }
 
 func writeRequestLine(out *strings.Builder, req terminalRequestLine) {
