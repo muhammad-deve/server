@@ -21,13 +21,16 @@ import (
 type Config struct {
 	Port      string
 	Subdomain string
+	Reset     bool
 	Region    string
 	Type      string
 }
 
 type registrationRequest struct {
-	Type string `json:"type"`
-	Port string `json:"port"`
+	Type      string `json:"type"`
+	Port      string `json:"port"`
+	Subdomain string `json:"subdomain,omitempty"`
+	Reset     bool   `json:"reset,omitempty"`
 }
 
 type registrationResponse struct {
@@ -54,8 +57,10 @@ func Start(cfg Config) {
 	defer conn.Close()
 
 	req := registrationRequest{
-		Type: cfg.Type,
-		Port: cfg.Port,
+		Type:      cfg.Type,
+		Port:      cfg.Port,
+		Subdomain: cfg.Subdomain,
+		Reset:     cfg.Reset,
 	}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		fmt.Println("error sending tunnel request:", err)
@@ -389,7 +394,7 @@ func printDashboard(cfg Config, resp registrationResponse, latency time.Duration
 	// Clear the entire terminal (visible + scrollback) and reprint the command at
 	// the top so the dashboard sits cleanly without any prior shell output above it.
 	fmt.Print("\033[H\033[2J\033[3J")
-	fmt.Printf("%s$%s %sgoport %s %s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, cfg.Type, cfg.Port, ansiReset)
+	fmt.Printf("%s$%s %s%s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, commandLine(cfg), ansiReset)
 	fmt.Println()
 	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, dashboardAddr, ansiReset)
 	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Region", ansiReset, ansiBold+ansiWhite, regionLabel(cfg.Region), ansiReset)
@@ -413,4 +418,15 @@ func regionLabel(region string) string {
 	default:
 		return region
 	}
+}
+
+func commandLine(cfg Config) string {
+	cmd := fmt.Sprintf("goport %s %s", cfg.Type, cfg.Port)
+	if cfg.Reset {
+		cmd += " --reset"
+	}
+	if cfg.Subdomain != "" {
+		cmd += " --custom " + cfg.Subdomain
+	}
+	return cmd
 }

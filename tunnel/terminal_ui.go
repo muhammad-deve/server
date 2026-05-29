@@ -188,7 +188,7 @@ func writeRequestLine(out *strings.Builder, req terminalRequestLine) {
 func buildTerminalDashboard(cfg Config, resp registrationResponse, latency time.Duration, dashboardPort int) string {
 	var out strings.Builder
 	dashboardAddr := "http://127.0.0.1:" + strconv.Itoa(dashboardPort)
-	fmt.Fprintf(&out, "%s$%s %sgoport %s %s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, cfg.Type, cfg.Port, ansiReset)
+	fmt.Fprintf(&out, "%s$%s %s%s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, commandLine(cfg), ansiReset)
 	out.WriteByte('\n')
 	fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, dashboardAddr, ansiReset)
 	fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Region", ansiReset, ansiBold+ansiWhite, regionLabel(cfg.Region), ansiReset)
