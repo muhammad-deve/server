@@ -8,6 +8,14 @@ interface SidebarProps {
   tunnelData: TunnelData
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  const i = Math.floor(Math.log(bytes) / Math.log(1024))
+  const value = bytes / Math.pow(1024, i)
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`
+}
+
 export function Sidebar({ tunnelData }: SidebarProps) {
   const dashboardHost = typeof window !== "undefined" ? window.location.host : "localhost:4040"
   const displayUrl = tunnelData.url ? tunnelData.url.replace(/^https?:\/\//, "") : "—"
@@ -105,7 +113,10 @@ export function Sidebar({ tunnelData }: SidebarProps) {
             <BarChart3 className="w-3.5 h-3.5 text-[var(--goport-text-muted)]" />
             <span className="text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Total Requests</span>
           </div>
-          <span className="text-xl font-semibold text-[var(--goport-text)]">{tunnelData.requestsToday.toLocaleString()}</span>
+          <div className="flex items-baseline gap-2">
+            <span className="text-xl font-semibold text-[var(--goport-text)]">{tunnelData.requestsToday.toLocaleString()}</span>
+            <span className="text-sm text-[var(--goport-text-muted)]">({formatBytes(tunnelData.totalBytes)})</span>
+          </div>
         </div>
       </div>
 

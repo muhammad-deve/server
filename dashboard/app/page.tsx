@@ -19,6 +19,7 @@ const defaultTunnel: TunnelData = {
   region: "",
   latency: 0,
   requestsToday: 0,
+  totalBytes: 0,
 }
 
 export default function Dashboard() {

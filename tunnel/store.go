@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type requestStore struct {
 	items       []*CapturedRequest
 	cap         int
 	totalCount  int64
+	totalBytes  atomic.Int64
 	subscribers map[chan *CapturedRequest]struct{}
 }
 
@@ -95,6 +97,16 @@ func (s *requestStore) Total() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.totalCount
+}
+
+func (s *requestStore) TotalBytes() int64 {
+	return s.totalBytes.Load()
+}
+
+// bytesCounter returns the underlying atomic counter so callers (e.g. a
+// byte-counting connection wrapper) can increment it directly on the hot path.
+func (s *requestStore) bytesCounter() *atomic.Int64 {
+	return &s.totalBytes
 }
 
 func (s *requestStore) Subscribe() chan *CapturedRequest {

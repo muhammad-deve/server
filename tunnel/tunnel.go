@@ -99,7 +99,14 @@ func Start(cfg Config) {
 	startTerminalUI(cfg, resp, latency, dashboardPort)
 	defer stopTerminalUI()
 
-	session, err := yamux.Client(conn, nil)
+	// Wrap the raw tunnel connection so every byte flowing through the tunnel
+	// (in both directions, including framing) is counted for the dashboard.
+	var tunnelConn net.Conn = conn
+	if state != nil {
+		tunnelConn = newCountingConn(conn, state.store.bytesCounter())
+	}
+
+	session, err := yamux.Client(tunnelConn, nil)
 	if err != nil {
 		stopTerminalUI()
 		fmt.Println("error starting tunnel session:", err)

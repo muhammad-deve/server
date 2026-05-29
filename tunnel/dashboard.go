@@ -96,6 +96,7 @@ func registerAPIRoutes(mux *http.ServeMux, state *dashboardState) {
 			"region":        t.Region,
 			"latency":       t.Latency,
 			"requestsToday": state.store.Total(),
+			"totalBytes":    state.store.TotalBytes(),
 			"started":       t.Started,
 		})
 	})
