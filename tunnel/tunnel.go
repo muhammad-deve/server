@@ -171,10 +171,14 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 	}
 	defer localConn.Close()
 
-	// Rewrite request so the local server sees a normal localhost request.
-	req.Host = localAddr
-	req.URL.Host = localAddr
+	// Point the connection at the local server but keep the original public Host
+	// header intact. Apps frequently build absolute URLs from the Host header
+	// (Swagger/OpenAPI "servers", redirects, generated links). Rewriting it to
+	// 127.0.0.1:<port> made those URLs point back at localhost, which breaks
+	// Swagger "Try it out" and similar flows with CORS / "failed to fetch" errors.
+	// ngrok preserves the Host by default, which is why it worked there.
 	req.URL.Scheme = "http"
+	req.URL.Host = localAddr
 	req.RequestURI = ""
 
 	// Strip hop-by-hop headers before forwarding.
