@@ -16,6 +16,14 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: 'GoPort — Local Developer Dashboard',
   description: 'Secure tunnels to localhost from Uzbekistan',
+  icons: {
+    icon: [
+      {
+        url: '/icon.svg',
+        type: 'image/svg+xml',
+      },
+    ],
+  },
 }
 
 export default function RootLayout({

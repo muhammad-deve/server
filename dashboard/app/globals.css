@@ -20,6 +20,10 @@
   --goport-success: #16a34a;
   --goport-error: #dc2626;
   --goport-warning: #ca8a04;
+  --goport-logo-fg-top: #09090b;
+  --goport-logo-fg-bottom: #27272a;
+  --goport-logo-cutout: var(--goport-bg-secondary);
+  --goport-logo-accent: #0891b2;
 
   --background: var(--goport-bg);
   --foreground: var(--goport-text);
@@ -69,6 +73,10 @@
   --goport-success: #22c55e;
   --goport-error: #ef4444;
   --goport-warning: #eab308;
+  --goport-logo-fg-top: #f8fafc;
+  --goport-logo-fg-bottom: #c8d4ee;
+  --goport-logo-cutout: var(--goport-bg-secondary);
+  --goport-logo-accent: #00d4ff;
 }
 
 @theme inline {

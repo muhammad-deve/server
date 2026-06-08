@@ -2,6 +2,7 @@
 
 import { Globe, MapPin, Gauge, BarChart3, ExternalLink } from "lucide-react"
 import { CopyButton } from "./copy-button"
+import { GoPortLogo } from "./goport-logo"
 import { TunnelData } from "@/lib/types"
 
 interface SidebarProps {
@@ -24,26 +25,9 @@ export function Sidebar({ tunnelData }: SidebarProps) {
     <aside className="w-64 min-h-screen bg-[var(--goport-bg-secondary)] border-r border-[var(--goport-border)] flex flex-col">
       {/* Logo */}
       <div className="h-14 px-5 flex items-center border-b border-[var(--goport-border)]">
-        <div className="flex items-center gap-3">
-          <svg
-            width="28"
-            height="28"
-            viewBox="0 0 64 64"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-            className="rounded"
-            aria-label="GoPort"
-          >
-            <rect width="64" height="64" rx="14" fill="#050505" />
-            <path d="M13 32H51" stroke="#25F59A" strokeWidth="5" strokeLinecap="round" />
-            <path d="M34 20L48 32L34 44" stroke="#25F59A" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M16 20H26C32.6 20 38 25.4 38 32C38 38.6 32.6 44 26 44H16" stroke="#FFFFFF" strokeWidth="5" strokeLinecap="round" />
-            <circle cx="16" cy="32" r="4" fill="#25F59A" />
-          </svg>
-          <div>
-            <h1 className="text-base font-semibold text-[var(--goport-text)] leading-tight">GoPort</h1>
-            <p className="text-xs text-[var(--goport-text-muted)] leading-tight">{dashboardHost}</p>
-          </div>
+        <div className="flex flex-col gap-0.5">
+          <GoPortLogo className="h-6 w-28" />
+          <p className="text-xs text-[var(--goport-text-muted)] leading-tight">{dashboardHost}</p>
         </div>
       </div>
 
