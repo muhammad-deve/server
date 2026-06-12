@@ -1,0 +1,44 @@
+name: Test Install Methods
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  test-macos-brew:
+    runs-on: macos-latest
+    steps:
+      - name: Install via Homebrew
+        run: |
+          brew tap muhammad-deve/goport
+          brew install goport
+      - name: Verify
+        run: goport --version
+
+  test-windows-scoop:
+    runs-on: windows-latest
+    steps:
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+      - name: Install via Scoop
+        shell: pwsh
+        run: |
+          scoop bucket add goport https://github.com/muhammad-deve/scoop-goport
+          scoop install goport
+      - name: Verify
+        shell: pwsh
+        run: goport --version
+
+  test-linux-curl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install via curl
+        run: |
+          curl -fsSL https://github.com/muhammad-deve/GoPort/releases/latest/download/goport-linux-amd64 -o /usr/local/bin/goport
+          chmod +x /usr/local/bin/goport
+      - name: Verify
+        run: goport --version
