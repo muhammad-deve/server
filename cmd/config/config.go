@@ -10,6 +10,7 @@ var (
 	ServerAddr string
 	Domain     string
 	Token      string
+	APIBaseURL string
 )
 
 func Load() {
@@ -21,6 +22,14 @@ func Load() {
 	Domain = os.Getenv("GOPORT_DOMAIN")
 	if Domain == "" {
 		Domain = "goport.uz"
+	}
+
+	// Base URL of the GoPort backend API. Defaults to the public backend host
+	// (back.<domain>); override with GOPORT_API_URL for local development, e.g.
+	// http://localhost:8090.
+	APIBaseURL = strings.TrimRight(strings.TrimSpace(os.Getenv("GOPORT_API_URL")), "/")
+	if APIBaseURL == "" {
+		APIBaseURL = "https://back." + Domain
 	}
 
 	// A token from the environment wins; otherwise fall back to the saved one.

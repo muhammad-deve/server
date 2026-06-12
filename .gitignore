@@ -4,3 +4,4 @@ goport-linux-amd64
 goport-windows-amd64.exe
 goport.exe
 server.exe
+dist/
