@@ -31,6 +31,7 @@ type registrationRequest struct {
 	Port      string `json:"port"`
 	Subdomain string `json:"subdomain,omitempty"`
 	Reset     bool   `json:"reset,omitempty"`
+	Token     string `json:"token,omitempty"`
 }
 
 type registrationResponse struct {
@@ -61,6 +62,7 @@ func Start(cfg Config) {
 		Port:      cfg.Port,
 		Subdomain: cfg.Subdomain,
 		Reset:     cfg.Reset,
+		Token:     config.Token,
 	}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		fmt.Println("error sending tunnel request:", err)
