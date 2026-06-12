@@ -75,7 +75,7 @@ func Start(cfg Config) {
 		return
 	}
 	if resp.Error != "" {
-		fmt.Println("server error:", resp.Error)
+		fmt.Println(resp.Error)
 		return
 	}
 	if resp.URL == "" {
