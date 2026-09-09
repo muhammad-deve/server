@@ -162,6 +162,7 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 	reqHeaders := flattenHeaders(req.Header)
 	method := req.Method
 	pathStr := req.URL.RequestURI()
+	isUpgradeRequest := isUpgrade(req)
 
 	localAddr := "127.0.0.1:" + port
 	localConn, err := net.Dial("tcp", localAddr)
@@ -183,8 +184,12 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 	req.URL.Host = localAddr
 	req.RequestURI = ""
 
-	// Strip hop-by-hop headers before forwarding.
-	stripHopByHop(req.Header)
+	// Upgrade headers are hop-by-hop for ordinary HTTP requests, but must remain
+	// intact for WebSocket connections. Removing them before checking for an
+	// upgrade turns a WebSocket request into a normal GET.
+	if !isUpgradeRequest {
+		stripHopByHop(req.Header)
+	}
 
 	// Restore the body we buffered so req.Write can resend it.
 	if reqBodyBytes != nil {
@@ -193,7 +198,7 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 	}
 
 	// Detect Upgrade requests (e.g. WebSocket) and run a raw bidirectional copy.
-	if isUpgrade(req) {
+	if isUpgradeRequest {
 		if err := req.Write(localConn); err != nil {
 			logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
 			writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to forward upgrade request: %v", err))
