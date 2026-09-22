@@ -104,7 +104,7 @@ export default function Dashboard() {
   }, [])
 
   return (
-    <div className="inspector-glow flex h-dvh overflow-hidden">
+    <div className="fixed inset-0 flex overflow-hidden bg-background">
       <Sidebar tunnelData={{ ...tunnel, requestsToday: requests.length }} />
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">

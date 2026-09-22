@@ -109,7 +109,7 @@ export function CodeBlock({ title, content }: { title: string; content: string }
       }
     >
       {/* Large bodies scroll inside the panel rather than being clipped off. */}
-      <div className="max-h-[min(60vh,32rem)] overflow-auto overscroll-contain bg-terminal">
+      <div className="max-h-[min(60vh,32rem)] overflow-auto bg-terminal">
         <pre
           className={`p-3.5 font-mono text-xs leading-relaxed text-terminal-foreground ${
             wrap ? "whitespace-pre-wrap break-all" : "w-max min-w-full whitespace-pre"
@@ -135,7 +135,7 @@ export function HeadersBlock({ headers }: { headers: Record<string, string> }) {
       {entries.length === 0 ? (
         <p className="px-3.5 py-4 text-xs text-muted-foreground">No headers.</p>
       ) : (
-        <div className="max-h-[min(40vh,20rem)] overflow-auto overscroll-contain">
+        <div className="max-h-[min(40vh,20rem)] overflow-auto">
           <dl className="divide-y divide-border/60">
             {entries.map(([key, value]) => (
               <div key={key} className="grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] gap-4 px-3.5 py-1.5 font-mono text-xs">
@@ -161,7 +161,7 @@ export function CurlBlock({ curl }: { curl: string }) {
   const highlighted = useMemo(() => highlightCurl(curl), [curl])
   return (
     <Panel title="cURL" meta="Re-run this request from your terminal" actions={<CopyButton text={curl} label="command" />}>
-      <div className="max-h-[min(60vh,32rem)] overflow-auto overscroll-contain bg-terminal">
+      <div className="max-h-[min(60vh,32rem)] overflow-auto bg-terminal">
         <pre className="whitespace-pre-wrap break-all p-3.5 font-mono text-xs leading-relaxed text-terminal-foreground">
           <code dangerouslySetInnerHTML={{ __html: highlighted }} />
         </pre>

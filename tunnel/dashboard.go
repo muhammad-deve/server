@@ -27,6 +27,7 @@ type dashboardState struct {
 	tunnel    tunnelInfo
 	store     *requestStore
 	localPort string
+	plan      *planWatcher
 }
 
 type tunnelInfo struct {
@@ -74,7 +75,11 @@ func startDashboard(localPort string) (*dashboardState, int, error) {
 	state := &dashboardState{
 		store:     newRequestStore(500),
 		localPort: localPort,
+		plan:      &planWatcher{},
 	}
+	// Refreshed in the background so the inspector can show the monthly
+	// allowance; never blocks the tunnel and never fails it.
+	state.plan.watch(60 * time.Second)
 
 	mux := http.NewServeMux()
 	registerAPIRoutes(mux, state)
@@ -97,6 +102,7 @@ func registerAPIRoutes(mux *http.ServeMux, state *dashboardState) {
 			"latency":       t.Latency,
 			"requestsToday": state.store.Total(),
 			"totalBytes":    state.store.TotalBytes(),
+			"plan":          state.plan.get(),
 			"version":       Version,
 			"started":       t.Started,
 		})

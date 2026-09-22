@@ -25,6 +25,13 @@ interface RawCapturedRequest {
 }
 
 interface RawTunnelInfo {
+  plan?: {
+    known: boolean
+    plan: string
+    isPro: boolean
+    monthlyBytes: number
+    monthBytes: number
+  }
   url: string
   status: string
   region: string
@@ -73,6 +80,7 @@ export async function fetchTunnel(): Promise<TunnelData> {
     requestsToday: raw.requestsToday || 0,
     totalBytes: raw.totalBytes || 0,
     version: raw.version || "",
+    plan: raw.plan?.known ? raw.plan : undefined,
   }
 }
 
@@ -101,7 +109,12 @@ export async function clearRequests(): Promise<void> {
 }
 
 export async function replayRequest(id: string): Promise<HttpRequest> {
-  const res = await fetch(`${apiBase()}/api/requests/${id}/replay`, { method: "POST" })
+  const res = await fetch(`${apiBase()}/api/requests/${id}/replay`, {
+    method: "POST",
+    // The target is localhost, so 15s is already generous. Without a signal a
+    // local app that accepts the socket and never answers hangs the UI forever.
+    signal: AbortSignal.timeout(15_000),
+  })
   if (!res.ok) {
     const text = await res.text()
     throw new Error(text || `replay failed: ${res.status}`)

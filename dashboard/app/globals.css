@@ -163,7 +163,15 @@
 
 @layer base {
   * { @apply border-border outline-ring/50; }
-  html, body { height: 100%; }
+  /*
+   * A fixed application shell: the root element is h-dvh and every scrollable
+   * region lives inside it, so the document itself must never scroll. Locking
+   * both axes here means no layout slip can leave the user scrolling past the
+   * app into empty space, and it subsumes the earlier overflow-x guard.
+   */
+  html, body { height: 100%; overflow: hidden; }
+  /* The shell is position:fixed, so #__next must not impose a height of its own. */
+  body > div:first-child { height: 100%; }
   body { @apply bg-background text-foreground; min-width: 320px; }
   ::selection { background: color-mix(in srgb, var(--primary) 28%, transparent); }
 
@@ -177,13 +185,6 @@
     cursor: pointer;
   }
   button:disabled { cursor: not-allowed; }
-}
-
-/* Soft glow, matching the landing's route surfaces. */
-.inspector-glow {
-  background:
-    radial-gradient(circle at 85% -10%, var(--glow), transparent 40%),
-    var(--background);
 }
 
 .json-key { color: var(--json-key); }

@@ -1,10 +1,11 @@
 "use client"
 
 import { useEffect, useId, useRef, useState } from "react"
-import { ChevronRight, Radio, RotateCw, SearchX } from "lucide-react"
+import { Check, ChevronRight, Radio, RotateCw, SearchX } from "lucide-react"
 import { HttpRequest, RequestDetails } from "@/lib/types"
 import { MethodBadge, StatusBadge } from "./badges"
 import { CodeBlock, HeadersBlock, CurlBlock } from "./code-block"
+import { CopyButton } from "./copy-button"
 import { fetchRequestDetails } from "@/lib/api"
 
 type Tab = "request" | "response" | "curl"
@@ -39,6 +40,20 @@ function generateCurlCommand(request: HttpRequest, details: RequestDetails, tunn
   return lines.join(" \\\n")
 }
 
+/*
+ * Replay feedback timing. A replay to localhost usually lands in under 100ms,
+ * so a spinner shown immediately appears and vanishes before it can be read --
+ * that registers as a glitch, not as feedback. Instead: stay silent while the
+ * work is near-instant, confirm with a tick, and only fall back to a spinner
+ * when the wait is actually long enough to need one.
+ */
+const SPINNER_DELAY_MS = 180   // below this, never show a spinner at all
+const SPINNER_MIN_MS = 420     // once shown, keep it long enough to read
+const DONE_HOLD_MS = 1400      // how long the success tick lingers
+const REPLAY_TIMEOUT_MS = 20_000
+
+type ReplayState = "idle" | "busy" | "done" | "error"
+
 function durationColor(ms: number) {
   if (ms > 1000) return "var(--status-5xx)"
   if (ms > 300) return "var(--status-4xx)"
@@ -52,7 +67,7 @@ const COL = {
   method: "w-[4.5rem] shrink-0",
   path: "min-w-0 flex-1",
   status: "w-[4.5rem] shrink-0",
-  duration: "hidden w-14 shrink-0 text-right sm:block",
+  duration: "hidden w-20 shrink-0 text-right sm:block",
   action: "w-8 shrink-0",
 }
 
@@ -109,10 +124,15 @@ export function RequestRow({ request, onReplay, tunnelUrl }: RequestRowProps) {
   const [activeTab, setActiveTab] = useState<Tab>("request")
   const [details, setDetails] = useState<RequestDetails | null>(null)
   const [detailsError, setDetailsError] = useState<string | null>(null)
-  const [isReplaying, setIsReplaying] = useState(false)
+  const [replayState, setReplayState] = useState<ReplayState>("idle")
+  const [spinnerVisible, setSpinnerVisible] = useState(false)
+  const [replayError, setReplayError] = useState<string | null>(null)
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   const [formattedTime, setFormattedTime] = useState("")
   const [isFresh] = useState(() => Date.now() - request.timestamp.getTime() < 3000)
   const baseId = useId()
+
+  useEffect(() => () => { timers.current.forEach(clearTimeout) }, [])
 
   useEffect(() => {
     setFormattedTime(
@@ -133,18 +153,63 @@ export function RequestRow({ request, onReplay, tunnelUrl }: RequestRowProps) {
     }
   }
 
+  const track = (t: ReturnType<typeof setTimeout>) => {
+    timers.current.push(t)
+    return t
+  }
+  const clearTimers = () => {
+    timers.current.forEach(clearTimeout)
+    timers.current = []
+  }
+
   const handleReplay = async () => {
-    if (isReplaying) return
-    setIsReplaying(true)
+    if (replayState === "busy") return
+    clearTimers()
+    setReplayState("busy")
+    setReplayError(null)
+    setSpinnerVisible(false)
+
+    // The spinner only appears if the work outlasts SPINNER_DELAY_MS.
+    let shownAt = 0
+    track(setTimeout(() => {
+      shownAt = Date.now()
+      setSpinnerVisible(true)
+    }, SPINNER_DELAY_MS))
+
+    // Watchdog: a wedged request must never leave a control stuck looking busy.
+    track(setTimeout(() => {
+      clearTimers()
+      setSpinnerVisible(false)
+      setReplayState("error")
+      setReplayError("timed out waiting for the replay to finish")
+    }, REPLAY_TIMEOUT_MS))
+
+    let failure: string | null = null
     try {
       await onReplay(request)
-    } finally {
-      setIsReplaying(false)
+    } catch (err) {
+      console.error("replay failed", err)
+      failure = err instanceof Error ? err.message : "replay failed"
     }
+
+    // If the spinner did become visible, let it sit long enough to be read
+    // rather than blinking out the moment the response lands.
+    const hold = shownAt ? Math.max(0, SPINNER_MIN_MS - (Date.now() - shownAt)) : 0
+    clearTimers()
+    track(setTimeout(() => {
+      setSpinnerVisible(false)
+      setReplayError(failure)
+      setReplayState(failure ? "error" : "done")
+      if (!failure) track(setTimeout(() => setReplayState("idle"), DONE_HOLD_MS))
+    }, hold))
   }
 
   return (
     <div className={isFresh ? "animate-row-in" : undefined}>
+      <span className="sr-only" role="status">
+        {replayState === "done" ? `Replayed ${request.method} ${request.path}` : ""}
+        {replayState === "error" && replayError ? `Replay failed: ${replayError}` : ""}
+      </span>
       <div
         className={`relative flex items-center gap-3 px-4 transition-colors hover:bg-secondary/60 sm:gap-4 sm:px-6 ${
           isExpanded ? "bg-secondary/60" : ""
@@ -186,12 +251,26 @@ export function RequestRow({ request, onReplay, tunnelUrl }: RequestRowProps) {
         <button
           type="button"
           onClick={handleReplay}
-          disabled={isReplaying}
-          title="Replay request"
+          disabled={replayState === "busy"}
+          aria-busy={replayState === "busy"}
+          title={
+            replayState === "error" && replayError
+              ? `Replay failed: ${replayError}`
+              : replayState === "done"
+              ? "Replayed"
+              : "Replay request"
+          }
           aria-label={`Replay ${request.method} ${request.path}`}
-          className={`${COL.action} inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-primary/12 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
+          className={`${COL.action} inline-flex size-8 items-center justify-center rounded-lg transition-colors hover:bg-primary/12 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-100 ${
+            replayState === "error" ? "text-destructive" : replayState === "done" ? "text-primary" : "text-muted-foreground"
+          }`}
         >
-          <RotateCw className={`size-4 ${isReplaying ? "replay-spin text-primary" : ""}`} aria-hidden />
+          {/* A fast replay shows no spinner at all -- just the tick. */}
+          {replayState === "done" ? (
+            <Check className="size-4" aria-hidden />
+          ) : (
+            <RotateCw className={`size-4 ${spinnerVisible ? "replay-spin text-primary" : ""}`} aria-hidden />
+          )}
         </button>
       </div>
 
@@ -212,7 +291,15 @@ export function RequestRow({ request, onReplay, tunnelUrl }: RequestRowProps) {
               <p className="text-xs text-destructive">Could not load details: {detailsError}</p>
             ) : details ? (
               <>
-                <DetailTabs active={activeTab} onChange={setActiveTab} baseId={baseId} />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <DetailTabs active={activeTab} onChange={setActiveTab} baseId={baseId} />
+                  <div className="flex min-w-0 items-center gap-1">
+                    <code className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={`${tunnelUrl}${request.path}`}>
+                      {tunnelUrl}{request.path}
+                    </code>
+                    <CopyButton text={`${tunnelUrl}${request.path}`} className="shrink-0" />
+                  </div>
+                </div>
                 <div className="mt-4 space-y-3">
                   {activeTab === "request" ? (
                     <>
@@ -280,7 +367,7 @@ export function RequestsTable({ requests, onReplay, tunnelUrl = "", filtering = 
         <span className={`${COL.method} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Method</span>
         <span className={`${COL.path} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Path</span>
         <span className={`${COL.status} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Status</span>
-        <span className={`${COL.duration} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Dur</span>
+        <span className={`${COL.duration} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Duration</span>
         <span className={COL.action} aria-hidden />
       </div>
 
