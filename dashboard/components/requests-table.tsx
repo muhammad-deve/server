@@ -1,237 +1,239 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
-import { ChevronRight, Clock, RotateCw } from "lucide-react"
+import { useEffect, useId, useRef, useState } from "react"
+import { ChevronRight, Radio, RotateCw, SearchX } from "lucide-react"
 import { HttpRequest, RequestDetails } from "@/lib/types"
 import { MethodBadge, StatusBadge } from "./badges"
 import { CodeBlock, HeadersBlock, CurlBlock } from "./code-block"
 import { fetchRequestDetails } from "@/lib/api"
 
-interface RequestRowProps {
-  request: HttpRequest
-  onReplay: (request: HttpRequest) => void
-  tunnelUrl: string
-}
+type Tab = "request" | "response" | "curl"
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "request", label: "Request" },
+  { id: "response", label: "Response" },
+  { id: "curl", label: "cURL" },
+]
+
+/**
+ * POSIX single-quoting. Header values and bodies are attacker-controlled, and
+ * the result is a command the developer pastes into their own shell -- double
+ * quotes would let `$(...)` in a header execute on their machine.
+ */
+const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
 function generateCurlCommand(request: HttpRequest, details: RequestDetails, tunnelUrl: string): string {
-  const baseUrl = tunnelUrl || ""
-  const lines: string[] = []
+  const url = `${tunnelUrl || ""}${request.path}`
+  const lines: string[] = [
+    request.method === "GET" ? `curl ${shellQuote(url)}` : `curl -X ${request.method} ${shellQuote(url)}`,
+  ]
 
-  if (request.method === "GET") {
-    lines.push(`curl ${baseUrl}${request.path}`)
-  } else {
-    lines.push(`curl -X ${request.method} ${baseUrl}${request.path}`)
+  for (const header of ["Content-Type", "Authorization", "Accept"]) {
+    const value = details.request.headers[header]
+    if (value) lines.push(`  -H ${shellQuote(`${header}: ${value}`)}`)
   }
 
-  const relevantHeaders = ["Content-Type", "Authorization", "Accept"]
-  for (const header of relevantHeaders) {
-    if (details.request.headers[header]) {
-      lines.push(`  -H "${header}: ${details.request.headers[header]}"`)
-    }
-  }
-
-  if (details.request.body) {
-    const trimmed = details.request.body.trim()
-    if (trimmed) {
-      // Escape single quotes for shell.
-      const escaped = trimmed.replace(/'/g, `'\\''`)
-      lines.push(`  -d '${escaped}'`)
-    }
-  }
+  const body = details.request.body?.trim()
+  if (body) lines.push(`  -d ${shellQuote(body)}`)
 
   return lines.join(" \\\n")
 }
 
+function durationColor(ms: number) {
+  if (ms > 1000) return "var(--status-5xx)"
+  if (ms > 300) return "var(--status-4xx)"
+  return "var(--muted-foreground)"
+}
+
+/** Column widths shared by the header and every row so the grid lines up. */
+const COL = {
+  chevron: "w-4 shrink-0",
+  time: "hidden w-[4.5rem] shrink-0 sm:block",
+  method: "w-[4.5rem] shrink-0",
+  path: "min-w-0 flex-1",
+  status: "w-[4.5rem] shrink-0",
+  duration: "hidden w-14 shrink-0 text-right sm:block",
+  action: "w-8 shrink-0",
+}
+
+/**
+ * Proper ARIA tabs: arrow keys move between tabs, only the active tab is in the
+ * tab order, and each tab points at its panel. Declaring role="tab" without
+ * this makes screen readers promise keyboard behaviour that does not exist.
+ */
+function DetailTabs({ active, onChange, baseId }: { active: Tab; onChange: (t: Tab) => void; baseId: string }) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([])
+
+  const onKeyDown = (e: React.KeyboardEvent, index: number) => {
+    const delta = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : e.key === "Home" ? -index : e.key === "End" ? TABS.length - 1 - index : 0
+    if (delta === 0) return
+    e.preventDefault()
+    const next = (index + delta + TABS.length) % TABS.length
+    onChange(TABS[next].id)
+    refs.current[next]?.focus()
+  }
+
+  return (
+    <div role="tablist" aria-label="Request details" className="inline-flex rounded-xl border border-border bg-secondary/60 p-1">
+      {TABS.map((tab, index) => (
+        <button
+          key={tab.id}
+          ref={(el) => { refs.current[index] = el }}
+          type="button"
+          role="tab"
+          id={`${baseId}-tab-${tab.id}`}
+          aria-selected={active === tab.id}
+          aria-controls={`${baseId}-panel`}
+          tabIndex={active === tab.id ? 0 : -1}
+          onKeyDown={(e) => onKeyDown(e, index)}
+          onClick={() => onChange(tab.id)}
+          className={`h-8 rounded-lg px-3.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+            active === tab.id ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+interface RequestRowProps {
+  request: HttpRequest
+  onReplay: (request: HttpRequest) => void | Promise<void>
+  tunnelUrl: string
+}
+
 export function RequestRow({ request, onReplay, tunnelUrl }: RequestRowProps) {
   const [isExpanded, setIsExpanded] = useState(false)
-  const [activeTab, setActiveTab] = useState<"request" | "response" | "curl">("request")
+  const [activeTab, setActiveTab] = useState<Tab>("request")
   const [details, setDetails] = useState<RequestDetails | null>(null)
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [isReplaying, setIsReplaying] = useState(false)
-  const [formattedTime, setFormattedTime] = useState<string>("")
-  const replayButtonRef = useRef<HTMLButtonElement>(null)
+  const [formattedTime, setFormattedTime] = useState("")
+  const [isFresh] = useState(() => Date.now() - request.timestamp.getTime() < 3000)
+  const baseId = useId()
 
   useEffect(() => {
     setFormattedTime(
-      request.timestamp.toLocaleTimeString("en-US", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
+      request.timestamp.toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }),
     )
   }, [request.timestamp])
 
-  const handleExpand = async () => {
-    if (!isExpanded && !details && !detailsError) {
+  const toggle = async () => {
+    const next = !isExpanded
+    setIsExpanded(next)
+    if (next && !details) {
+      setDetailsError(null)
       try {
-        const d = await fetchRequestDetails(request.id)
-        setDetails(d)
+        setDetails(await fetchRequestDetails(request.id))
       } catch (err) {
         setDetailsError(err instanceof Error ? err.message : "failed to load details")
       }
     }
-    setIsExpanded(!isExpanded)
   }
 
-  const handleReplay = (e: React.MouseEvent) => {
-    e.stopPropagation()
+  const handleReplay = async () => {
+    if (isReplaying) return
     setIsReplaying(true)
-
-    if (replayButtonRef.current) {
-      replayButtonRef.current.classList.add("replay-spin")
-    }
-
-    // Run replay through the API; the spinner clears once it returns.
-    Promise.resolve(onReplay(request)).finally(() => {
+    try {
+      await onReplay(request)
+    } finally {
       setIsReplaying(false)
-      if (replayButtonRef.current) {
-        replayButtonRef.current.classList.remove("replay-spin")
-      }
-    })
+    }
   }
 
   return (
-    <div className="group">
+    <div className={isFresh ? "animate-row-in" : undefined}>
       <div
-        onClick={handleExpand}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault()
-            handleExpand()
-          }
-        }}
-        className={`w-full px-4 py-2.5 flex items-center gap-4 transition-colors duration-150 cursor-pointer hover:bg-[var(--goport-bg-tertiary)] ${
-          isExpanded ? "bg-[var(--goport-bg-tertiary)]" : ""
+        className={`relative flex items-center gap-3 px-4 transition-colors hover:bg-secondary/60 sm:gap-4 sm:px-6 ${
+          isExpanded ? "bg-secondary/60" : ""
         }`}
       >
-        <ChevronRight
-          className={`w-3.5 h-3.5 text-[var(--goport-text-muted)] transition-transform duration-150 ${
-            isExpanded ? "rotate-90" : ""
-          }`}
-        />
+        {isExpanded ? <span className="absolute inset-y-0 left-0 w-0.5 bg-primary" aria-hidden /> : null}
 
-        <div className="flex items-center gap-1.5 w-20 shrink-0">
-          <Clock className="w-3 h-3 text-[var(--goport-text-muted)]" />
-          <span className="text-xs text-[var(--goport-text-muted)] font-mono">
+        {/* The disclosure is a real button. The replay control is a sibling, not
+            a descendant -- a button may not contain another focusable element. */}
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={isExpanded}
+          aria-controls={`${baseId}-panel`}
+          className="flex min-w-0 flex-1 items-center gap-3 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:gap-4"
+        >
+          <ChevronRight
+            className={`${COL.chevron} size-4 text-muted-foreground transition-transform duration-200 ${isExpanded ? "rotate-90 text-foreground" : ""}`}
+            aria-hidden
+          />
+          <span className={`${COL.time} font-mono text-xs tabular-nums text-muted-foreground`}>
             {formattedTime || "--:--:--"}
           </span>
-        </div>
-
-        <div className="w-16 shrink-0">
-          <MethodBadge method={request.method} />
-        </div>
-
-        <div className="flex-1 text-left truncate">
-          <code className="text-sm text-[var(--goport-text-secondary)] font-mono">{request.path}</code>
-        </div>
-
-        <div className="w-14 shrink-0">
-          <StatusBadge statusCode={request.statusCode} />
-        </div>
-
-        <div className="w-16 shrink-0 text-right">
-          <span
-            className={`text-xs font-mono ${
-              request.duration > 1000
-                ? "text-[var(--goport-error)]"
-                : request.duration > 200
-                ? "text-[var(--goport-warning)]"
-                : "text-[var(--goport-text-muted)]"
-            }`}
-          >
+          <span className={COL.method}>
+            <MethodBadge method={request.method} />
+          </span>
+          <code className={`${COL.path} truncate font-mono text-sm text-foreground`} title={request.path}>
+            {request.path}
+          </code>
+          <span className={COL.status}>
+            <StatusBadge statusCode={request.statusCode} />
+          </span>
+          <span className={`${COL.duration} font-mono text-xs tabular-nums`} style={{ color: durationColor(request.duration) }}>
             {request.duration}ms
           </span>
-        </div>
+        </button>
 
+        {/* Always visible: a hover-only affordance is unreachable on touch. */}
         <button
-          ref={replayButtonRef}
+          type="button"
           onClick={handleReplay}
           disabled={isReplaying}
-          className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[var(--goport-border)] disabled:opacity-50"
           title="Replay request"
-          aria-label="Replay request"
+          aria-label={`Replay ${request.method} ${request.path}`}
+          className={`${COL.action} inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-primary/12 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
         >
-          <RotateCw className="w-3.5 h-3.5 text-[var(--goport-text-muted)]" />
+          <RotateCw className={`size-4 ${isReplaying ? "replay-spin text-primary" : ""}`} aria-hidden />
         </button>
       </div>
 
+      {/* 0fr -> 1fr grows to the real content height. The old max-h-[600px]
+          silently cut off anything taller. */}
       <div
-        className={`overflow-hidden transition-all duration-200 ease-out ${
-          isExpanded ? "max-h-[600px] opacity-100" : "max-h-0 opacity-0"
-        }`}
+        className={`grid transition-[grid-template-rows] duration-200 ease-out ${isExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
       >
-        {detailsError ? (
-          <div className="px-4 pb-4 pt-2 bg-[var(--goport-bg-tertiary)] border-t border-[var(--goport-border)]/50">
-            <div className="text-xs text-[var(--goport-error)]">Failed to load details: {detailsError}</div>
+        <div className="overflow-hidden">
+          <div
+            id={`${baseId}-panel`}
+            role={details ? "tabpanel" : undefined}
+            aria-labelledby={details ? `${baseId}-tab-${activeTab}` : undefined}
+            tabIndex={details ? 0 : undefined}
+            className="border-t border-border bg-secondary/25 px-4 pb-5 pt-4 focus-visible:outline-none sm:px-6"
+          >
+            {detailsError ? (
+              <p className="text-xs text-destructive">Could not load details: {detailsError}</p>
+            ) : details ? (
+              <>
+                <DetailTabs active={activeTab} onChange={setActiveTab} baseId={baseId} />
+                <div className="mt-4 space-y-3">
+                  {activeTab === "request" ? (
+                    <>
+                      <HeadersBlock headers={details.request.headers} />
+                      <CodeBlock title="Body" content={details.request.body || ""} />
+                    </>
+                  ) : activeTab === "response" ? (
+                    <>
+                      <HeadersBlock headers={details.response.headers} />
+                      <CodeBlock title="Body" content={details.response.body} />
+                    </>
+                  ) : (
+                    <CurlBlock curl={generateCurlCommand(request, details, tunnelUrl)} />
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">Loading details...</p>
+            )}
           </div>
-        ) : details ? (
-          <div className="px-4 pb-4 pt-2 bg-[var(--goport-bg-tertiary)] border-t border-[var(--goport-border)]/50">
-            <div className="flex gap-0.5 mb-4 p-0.5 bg-[var(--goport-bg)] rounded-md w-fit border border-[var(--goport-border)]">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setActiveTab("request")
-                }}
-                className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                  activeTab === "request"
-                    ? "bg-[var(--goport-bg-tertiary)] text-[var(--goport-text-secondary)]"
-                    : "text-[var(--goport-text-muted)] hover:text-[var(--goport-text-secondary)]"
-                }`}
-              >
-                Request
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setActiveTab("response")
-                }}
-                className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                  activeTab === "response"
-                    ? "bg-[var(--goport-bg-tertiary)] text-[var(--goport-text-secondary)]"
-                    : "text-[var(--goport-text-muted)] hover:text-[var(--goport-text-secondary)]"
-                }`}
-              >
-                Response
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setActiveTab("curl")
-                }}
-                className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                  activeTab === "curl"
-                    ? "bg-[var(--goport-bg-tertiary)] text-[var(--goport-text-secondary)]"
-                    : "text-[var(--goport-text-muted)] hover:text-[var(--goport-text-secondary)]"
-                }`}
-              >
-                curl
-              </button>
-            </div>
-
-            <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
-              {activeTab === "request" ? (
-                <>
-                  <HeadersBlock headers={details.request.headers} />
-                  <CodeBlock title="Body" content={details.request.body || ""} />
-                </>
-              ) : activeTab === "response" ? (
-                <>
-                  <HeadersBlock headers={details.response.headers} />
-                  <CodeBlock title="Body" content={details.response.body} />
-                </>
-              ) : (
-                <CurlBlock curl={generateCurlCommand(request, details, tunnelUrl)} />
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="px-4 pb-4 pt-2 bg-[var(--goport-bg-tertiary)] border-t border-[var(--goport-border)]/50">
-            <div className="text-xs text-[var(--goport-text-muted)]">Loading details…</div>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   )
@@ -241,36 +243,48 @@ interface RequestsTableProps {
   requests: HttpRequest[]
   onReplay: (request: HttpRequest) => void
   tunnelUrl?: string
+  /** True when a filter is active, so the empty state can say so. */
+  filtering?: boolean
 }
 
-export function RequestsTable({ requests, onReplay, tunnelUrl = "" }: RequestsTableProps) {
+export function RequestsTable({ requests, onReplay, tunnelUrl = "", filtering = false }: RequestsTableProps) {
   if (requests.length === 0) {
+    const Icon = filtering ? SearchX : Radio
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
-        <div className="w-12 h-12 rounded-full bg-[var(--goport-bg-tertiary)] border border-[var(--goport-border)] flex items-center justify-center mb-4">
-          <div className="w-2 h-2 rounded-full bg-[var(--goport-success)] animate-pulse-dot"></div>
-        </div>
-        <h3 className="text-sm font-medium text-[var(--goport-text-secondary)] mb-1">Waiting for requests</h3>
-        <p className="text-xs text-[var(--goport-text-muted)] max-w-xs">
-          Send HTTP requests to your tunnel URL and they will appear here.
+      <div className="flex flex-1 flex-col items-center justify-center p-8 text-center">
+        <span className="flex size-12 items-center justify-center rounded-2xl border border-border bg-card text-primary">
+          <Icon className="size-5" aria-hidden />
+        </span>
+        <h3 className="mt-4 text-sm font-semibold text-foreground">
+          {filtering ? "No requests match that filter" : "Waiting for requests"}
+        </h3>
+        <p className="mt-1.5 max-w-sm text-xs leading-5 text-muted-foreground">
+          {filtering
+            ? "Clear the filter to see everything captured on this tunnel."
+            : "Send an HTTP request to your tunnel URL and it will appear here."}
         </p>
+        {!filtering && tunnelUrl ? (
+          <code className="mt-4 rounded-lg border border-border bg-terminal px-3 py-2 font-mono text-xs text-terminal-foreground">
+            curl {tunnelUrl}
+          </code>
+        ) : null}
       </div>
     )
   }
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="sticky top-0 z-10 px-4 py-2.5 bg-[var(--goport-bg-secondary)] border-b border-[var(--goport-border)] flex items-center gap-4">
-        <div className="w-3.5"></div>
-        <div className="w-20 shrink-0 text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Time</div>
-        <div className="w-16 shrink-0 text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Method</div>
-        <div className="flex-1 text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Path</div>
-        <div className="w-14 shrink-0 text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Status</div>
-        <div className="w-16 shrink-0 text-right text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Duration</div>
-        <div className="w-8"></div>
+      <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-card/95 px-4 py-2.5 backdrop-blur sm:gap-4 sm:px-6">
+        <span className={COL.chevron} aria-hidden />
+        <span className={`${COL.time} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Time</span>
+        <span className={`${COL.method} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Method</span>
+        <span className={`${COL.path} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Path</span>
+        <span className={`${COL.status} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Status</span>
+        <span className={`${COL.duration} text-[11px] font-medium uppercase tracking-wide text-muted-foreground`}>Dur</span>
+        <span className={COL.action} aria-hidden />
       </div>
 
-      <div className="divide-y divide-[var(--goport-border)]/50">
+      <div className="divide-y divide-border/60">
         {requests.map((request) => (
           <RequestRow key={request.id} request={request} onReplay={onReplay} tunnelUrl={tunnelUrl} />
         ))}

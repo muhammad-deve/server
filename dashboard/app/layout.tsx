@@ -5,17 +5,17 @@ import './globals.css'
 
 const jetbrainsMono = JetBrains_Mono({ 
   subsets: ["latin"],
-  variable: '--font-mono'
+  variable: '--font-jetbrains-mono',
 })
 
 const inter = Inter({ 
   subsets: ["latin"],
-  variable: '--font-sans'
+  variable: '--font-inter',
 })
 
 export const metadata: Metadata = {
   title: 'GoPort — Local Developer Dashboard',
-  description: 'Secure tunnels to localhost from Uzbekistan',
+  description: 'Inspect and replay requests flowing through your GoPort tunnel.',
   icons: {
     icon: [
       {
@@ -33,11 +33,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${inter.variable} ${jetbrainsMono.variable} font-mono antialiased`}>
+      <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased`}>
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"
           enableSystem={false}
+          storageKey="goport-theme"
           disableTransitionOnChange
         >
           {children}

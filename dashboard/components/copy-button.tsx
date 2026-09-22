@@ -1,77 +1,65 @@
 "use client"
 
-import { useState, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Check, Copy } from "lucide-react"
-import { motion, AnimatePresence } from "framer-motion"
 
 interface CopyButtonProps {
   text: string
+  /** When set, the button shows a text label and names itself "Copy <label>". */
+  label?: string
   className?: string
 }
 
-export function CopyButton({ text, className = "" }: CopyButtonProps) {
+async function writeClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    // The async clipboard API needs a secure context. The inspector is served
+    // over plain http on 127.0.0.1, which most browsers treat as secure, but
+    // not all -- so fall back to the legacy path rather than failing silently.
+    try {
+      const textarea = document.createElement("textarea")
+      textarea.value = text
+      textarea.style.position = "fixed"
+      textarea.style.opacity = "0"
+      document.body.appendChild(textarea)
+      textarea.select()
+      const ok = document.execCommand("copy")
+      document.body.removeChild(textarea)
+      return ok
+    } catch {
+      return false
+    }
+  }
+}
+
+export function CopyButton({ text, label, className = "" }: CopyButtonProps) {
   const [copied, setCopied] = useState(false)
-  const buttonRef = useRef<HTMLButtonElement>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    
-    // Try clipboard API with fallback
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      // Fallback for iframe/permissions issues - create a temporary textarea
-      const textarea = document.createElement('textarea')
-      textarea.value = text
-      textarea.style.position = 'fixed'
-      textarea.style.opacity = '0'
-      document.body.appendChild(textarea)
-      textarea.select()
-      document.execCommand('copy')
-      document.body.removeChild(textarea)
-    }
-    
+    if (!(await writeClipboard(text))) return
     setCopied(true)
-    
-    // Add flash animation
-    if (buttonRef.current) {
-      buttonRef.current.classList.add("copy-flash")
-    }
-    
-    // Remove flash class after animation completes
-    setTimeout(() => {
-      if (buttonRef.current) {
-        buttonRef.current.classList.remove("copy-flash")
-      }
-    }, 1000)
-    
-    setTimeout(() => setCopied(false), 2000)
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setCopied(false), 1600)
   }
 
   return (
     <button
-      ref={buttonRef}
+      type="button"
       onClick={handleCopy}
-      className={`p-1.5 rounded-md transition-colors duration-200 hover:bg-[var(--goport-border)] ${className}`}
-      title="Copy to clipboard"
-      aria-label={copied ? "Copied!" : "Copy to clipboard"}
+      title={copied ? "Copied" : "Copy to clipboard"}
+      aria-label={copied ? "Copied" : label ? `Copy ${label}` : "Copy to clipboard"}
+      className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        copied ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+      } ${className}`}
     >
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.span
-          key={copied ? "check" : "copy"}
-          initial={{ scale: 0, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0, opacity: 0 }}
-          transition={{ duration: 0.15, ease: "easeOut" }}
-          className="flex items-center justify-center"
-        >
-          {copied ? (
-            <Check className="w-4 h-4 text-[var(--goport-success)]" />
-          ) : (
-            <Copy className="w-4 h-4 text-[var(--goport-text-muted)] hover:text-[var(--goport-text-secondary)]" />
-          )}
-        </motion.span>
-      </AnimatePresence>
+      {copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+      {label ? <span>{copied ? "Copied" : "Copy"}</span> : null}
     </button>
   )
 }

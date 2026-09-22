@@ -104,17 +104,24 @@ export default function Dashboard() {
   }, [])
 
   return (
-    <div className="flex min-h-screen bg-[var(--goport-bg)]">
+    <div className="inspector-glow flex h-dvh overflow-hidden">
       <Sidebar tunnelData={{ ...tunnel, requestsToday: requests.length }} />
 
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <TopBar
+          requestCount={requests.length}
+          filteredCount={filteredRequests.length}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onClearRequests={handleClearRequests}
         />
 
-        <RequestsTable requests={filteredRequests} onReplay={handleReplay} tunnelUrl={tunnel.url} />
+        <RequestsTable
+          requests={filteredRequests}
+          onReplay={handleReplay}
+          tunnelUrl={tunnel.url}
+          filtering={searchQuery.trim().length > 0}
+        />
       </main>
     </div>
   )

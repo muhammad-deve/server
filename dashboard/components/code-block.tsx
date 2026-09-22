@@ -1,108 +1,171 @@
 "use client"
 
+import { useMemo, useState } from "react"
+import { WrapText } from "lucide-react"
 import { CopyButton } from "./copy-button"
 
-interface CodeBlockProps {
-  title: string
-  content: string
+/**
+ * Request and response bodies arrive from the public internet, and anyone who
+ * knows a tunnel URL can choose their contents. Escape before building any
+ * highlighted markup: without this, a body of `<img src=x onerror=...>` runs
+ * inside the inspector, where it can replay or clear the user's requests.
+ *
+ * Escaping `&`, `<` and `>` is sufficient because the result is only ever
+ * inserted in text-node position, never into an attribute value.
+ */
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 
-export function CodeBlock({ title, content }: CodeBlockProps) {
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+const JSON_TOKEN =
+  /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g
+
+/** Tokenises the ALREADY-escaped string, so no raw user input reaches the DOM. */
+function highlightJSON(escaped: string) {
+  return escaped.replace(JSON_TOKEN, (match) => {
+    let cls = "json-number"
+    if (match.startsWith('"')) cls = match.trimEnd().endsWith(":") ? "json-key" : "json-string"
+    else if (match === "true" || match === "false") cls = "json-bool"
+    else if (match === "null") cls = "json-null"
+    return `<span class="${cls}">${match}</span>`
+  })
+}
+
+function tryPrettyJSON(content: string): string | null {
+  const trimmed = content.trim()
+  if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return null
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
+  } catch {
+    return null
+  }
+}
+
+function Panel({
+  title,
+  meta,
+  actions,
+  children,
+}: {
+  title: string
+  meta?: React.ReactNode
+  actions?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <section className="overflow-hidden rounded-xl border border-border bg-card">
+      <header className="flex min-h-10 items-center justify-between gap-3 border-b border-border px-3.5 py-1.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-xs font-semibold text-foreground">{title}</span>
+          {meta ? <span className="truncate text-xs text-muted-foreground">{meta}</span> : null}
+        </div>
+        <div className="flex items-center gap-1">{actions}</div>
+      </header>
+      {children}
+    </section>
+  )
+}
+
+export function CodeBlock({ title, content }: { title: string; content: string }) {
+  const [wrap, setWrap] = useState(true)
+  const pretty = useMemo(() => (content ? tryPrettyJSON(content) : null), [content])
+  const size = useMemo(() => new Blob([content || ""]).size, [content])
+  const highlighted = useMemo(() => (pretty ? highlightJSON(escapeHtml(pretty)) : null), [pretty])
+
   if (!content) {
     return (
-      <div className="rounded-md bg-[var(--goport-bg)] border border-[var(--goport-border)] p-4">
-        <div className="text-xs text-[var(--goport-text-muted)] italic">No {title.toLowerCase()}</div>
-      </div>
+      <Panel title={title}>
+        <p className="px-3.5 py-4 text-xs text-muted-foreground">No {title.toLowerCase()} for this request.</p>
+      </Panel>
     )
   }
 
-  // Syntax highlighting for JSON
-  const highlightJSON = (json: string) => {
-    return json
-      .replace(/"([^"]+)":/g, '<span class="text-[var(--goport-text-secondary)]">"$1"</span>:')
-      .replace(/: "([^"]+)"/g, ': <span class="text-[var(--goport-success)]">"$1"</span>')
-      .replace(/: (\d+)/g, ': <span class="text-[var(--goport-cyan)]">$1</span>')
-      .replace(/: (true|false)/g, ': <span class="text-[var(--goport-warning)]">$1</span>')
-      .replace(/: (null)/g, ': <span class="text-[var(--goport-text-muted)]">$1</span>')
-  }
-
-  const isJSON = content.trim().startsWith('{') || content.trim().startsWith('[')
-  
   return (
-    <div className="rounded-md bg-[var(--goport-bg)] border border-[var(--goport-border)] overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-[var(--goport-bg-secondary)] border-b border-[var(--goport-border)]">
-        <span className="text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">{title}</span>
-        <CopyButton text={content} />
-      </div>
-      <div className="p-3 overflow-x-auto">
-        <pre className="text-xs leading-relaxed font-mono">
-          {isJSON ? (
-            <code dangerouslySetInnerHTML={{ __html: highlightJSON(content) }} />
-          ) : (
-            <code className="text-[var(--goport-text-secondary)]">{content}</code>
-          )}
+    <Panel
+      title={title}
+      meta={`${pretty ? "JSON · " : ""}${formatBytes(size)}`}
+      actions={
+        <>
+          <button
+            type="button"
+            onClick={() => setWrap((w) => !w)}
+            aria-pressed={wrap}
+            title={wrap ? "Turn off line wrapping" : "Wrap long lines"}
+            aria-label={wrap ? "Turn off line wrapping" : "Wrap long lines"}
+            className={`inline-flex size-7 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+              wrap ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+            }`}
+          >
+            <WrapText className="size-3.5" aria-hidden />
+          </button>
+          <CopyButton text={pretty ?? content} label={title.toLowerCase()} />
+        </>
+      }
+    >
+      {/* Large bodies scroll inside the panel rather than being clipped off. */}
+      <div className="max-h-[min(60vh,32rem)] overflow-auto overscroll-contain bg-terminal">
+        <pre
+          className={`p-3.5 font-mono text-xs leading-relaxed text-terminal-foreground ${
+            wrap ? "whitespace-pre-wrap break-all" : "w-max min-w-full whitespace-pre"
+          }`}
+        >
+          {highlighted ? <code dangerouslySetInnerHTML={{ __html: highlighted }} /> : <code>{content}</code>}
         </pre>
       </div>
-    </div>
+    </Panel>
   )
 }
 
-interface HeadersBlockProps {
-  headers: Record<string, string>
-}
-
-export function HeadersBlock({ headers }: HeadersBlockProps) {
-  const headersText = Object.entries(headers)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join('\n')
+export function HeadersBlock({ headers }: { headers: Record<string, string> }) {
+  const entries = Object.entries(headers).sort(([a], [b]) => a.localeCompare(b))
+  const headersText = entries.map(([k, v]) => `${k}: ${v}`).join("\n")
 
   return (
-    <div className="rounded-md bg-[var(--goport-bg)] border border-[var(--goport-border)] overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-[var(--goport-bg-secondary)] border-b border-[var(--goport-border)]">
-        <span className="text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Headers</span>
-        <CopyButton text={headersText} />
-      </div>
-      <div className="p-3 overflow-x-auto">
-        <div className="space-y-0.5">
-          {Object.entries(headers).map(([key, value]) => (
-            <div key={key} className="text-xs font-mono">
-              <span className="text-[var(--goport-text-secondary)]">{key}</span>
-              <span className="text-[var(--goport-text-muted)]">: </span>
-              <span className="text-[var(--goport-text-muted)]">{value}</span>
-            </div>
-          ))}
+    <Panel
+      title="Headers"
+      meta={entries.length ? String(entries.length) : undefined}
+      actions={entries.length ? <CopyButton text={headersText} label="headers" /> : null}
+    >
+      {entries.length === 0 ? (
+        <p className="px-3.5 py-4 text-xs text-muted-foreground">No headers.</p>
+      ) : (
+        <div className="max-h-[min(40vh,20rem)] overflow-auto overscroll-contain">
+          <dl className="divide-y divide-border/60">
+            {entries.map(([key, value]) => (
+              <div key={key} className="grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] gap-4 px-3.5 py-1.5 font-mono text-xs">
+                <dt className="truncate font-medium text-foreground" title={key}>{key}</dt>
+                <dd className="break-all text-muted-foreground">{value}</dd>
+              </div>
+            ))}
+          </dl>
         </div>
-      </div>
-    </div>
+      )}
+    </Panel>
   )
 }
 
-interface CurlBlockProps {
-  curl: string
+/** Same rule as the JSON path: escape first, then decorate. */
+function highlightCurl(cmd: string) {
+  return escapeHtml(cmd)
+    .replace(/^curl/, '<span class="curl-cmd">curl</span>')
+    .replace(/(^|\s)(-X|-H|-d)(\s)/g, '$1<span class="curl-flag">$2</span>$3')
 }
 
-export function CurlBlock({ curl }: CurlBlockProps) {
-  // Highlight curl command
-  const highlightCurl = (cmd: string) => {
-    return cmd
-      .replace(/^(curl)/m, '<span class="text-[var(--goport-cyan)]">$1</span>')
-      .replace(/(-X\s+)(\w+)/g, '$1<span class="text-[var(--goport-violet)]">$2</span>')
-      .replace(/(-H\s+)"([^"]+)"/g, '$1<span class="text-[var(--goport-text-secondary)]">"$2"</span>')
-      .replace(/(-d\s+)'([^']+)'/g, '$1<span class="text-[var(--goport-success)]">\'$2\'</span>')
-      .replace(/(https?:\/\/[^\s\\]+)/g, '<span class="text-[var(--goport-text-secondary)]">$1</span>')
-  }
-
+export function CurlBlock({ curl }: { curl: string }) {
+  const highlighted = useMemo(() => highlightCurl(curl), [curl])
   return (
-    <div className="rounded-md bg-[var(--goport-bg)] border border-[var(--goport-border)] overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-[var(--goport-bg-secondary)] border-b border-[var(--goport-border)]">
-        <span className="text-xs text-[var(--goport-text-muted)] uppercase tracking-wide">Command</span>
-        <CopyButton text={curl} />
-      </div>
-      <div className="p-3 overflow-x-auto">
-        <pre className="text-xs leading-relaxed font-mono">
-          <code dangerouslySetInnerHTML={{ __html: highlightCurl(curl) }} />
+    <Panel title="cURL" meta="Re-run this request from your terminal" actions={<CopyButton text={curl} label="command" />}>
+      <div className="max-h-[min(60vh,32rem)] overflow-auto overscroll-contain bg-terminal">
+        <pre className="whitespace-pre-wrap break-all p-3.5 font-mono text-xs leading-relaxed text-terminal-foreground">
+          <code dangerouslySetInnerHTML={{ __html: highlighted }} />
         </pre>
       </div>
-    </div>
+    </Panel>
   )
 }
