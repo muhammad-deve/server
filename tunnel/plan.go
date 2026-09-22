@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -26,16 +27,11 @@ type planInfo struct {
 	MonthBytes   int64  `json:"monthBytes"`
 }
 
-// Only the fields the inspector needs; the endpoint returns a lot more.
-type dashboardPayload struct {
-	MonthBytes int64 `json:"monthBytes"`
-	Billing    *struct {
-		IsPro bool `json:"isPro"`
-		Plan  struct {
-			Key          string `json:"key"`
-			MonthlyBytes int64  `json:"monthlyBytes"`
-		} `json:"plan"`
-	} `json:"billing"`
+type planPayload struct {
+	Plan         string `json:"plan"`
+	IsPro        bool   `json:"isPro"`
+	MonthlyBytes int64  `json:"monthlyBytes"`
+	MonthBytes   int64  `json:"monthBytes"`
 }
 
 type planWatcher struct {
@@ -56,18 +52,27 @@ func (p *planWatcher) set(info planInfo) {
 }
 
 // fetch asks the GoPort API for the account's plan and month-to-date traffic.
-// The same BytesForPeriod query backs the enforcement check on the server, so
-// the number shown here is the one the limit is actually measured against.
+//
+// It posts the CLI token to /auth/cli-plan rather than calling the dashboard
+// route: the dashboard requires a PocketBase record session, which the CLI does
+// not have, so that route answers 401 for a CLI token. The same BytesForPeriod
+// query backs the server's own limit check, so this figure is the one the limit
+// is actually measured against.
 func (p *planWatcher) fetch(ctx context.Context) error {
 	if config.Token == "" || config.APIBaseURL == "" {
 		return nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, config.APIBaseURL+"/api/v1/dashboard", nil)
+	body, err := json.Marshal(map[string]string{"token": config.Token})
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", config.Token)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.APIBaseURL+"/api/v1/auth/cli-plan", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
@@ -75,22 +80,22 @@ func (p *planWatcher) fetch(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil // not signed in, or the API is unhappy; stay silent
+		return nil // unauthenticated or self-hosted without billing; stay silent
 	}
 
-	var payload dashboardPayload
+	var payload planPayload
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return err
 	}
-	if payload.Billing == nil || payload.Billing.Plan.MonthlyBytes <= 0 {
+	if payload.MonthlyBytes <= 0 {
 		return nil
 	}
 
 	p.set(planInfo{
 		Known:        true,
-		Plan:         payload.Billing.Plan.Key,
-		IsPro:        payload.Billing.IsPro,
-		MonthlyBytes: payload.Billing.Plan.MonthlyBytes,
+		Plan:         payload.Plan,
+		IsPro:        payload.IsPro,
+		MonthlyBytes: payload.MonthlyBytes,
 		MonthBytes:   payload.MonthBytes,
 	})
 	return nil
