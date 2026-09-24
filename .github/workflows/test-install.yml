@@ -11,8 +11,7 @@ jobs:
     steps:
       - name: Install via Homebrew
         run: |
-          brew tap muhammad-deve/goport
-          brew install goport
+          brew install muhammad-deve/goport/goport
       - name: Verify
         run: goport --version
 
