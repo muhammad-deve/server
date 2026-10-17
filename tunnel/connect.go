@@ -22,6 +22,10 @@ const (
 	handshakeTimeout  = 15 * time.Second
 	reconnectMinDelay = 1 * time.Second
 	reconnectMaxDelay = 30 * time.Second
+	// For the first minute after a drop the CLI retries every 1.5-3s, so a
+	// tunnel is back within seconds of a server restart (every deploy).
+	fastRetryDelay  = 3 * time.Second
+	fastRetryWindow = time.Minute
 )
 
 var errInterrupted = errors.New("interrupted")
@@ -189,6 +193,7 @@ func serve(conn net.Conn, cfg Config, state *dashboardState, interrupt <-chan os
 func reconnect(cfg Config, previous registrationResponse, reason string, state *dashboardState, interrupt <-chan os.Signal) (net.Conn, registrationResponse, error) {
 	delay := reconnectMinDelay
 	lastErr := ""
+	lostAt := time.Now()
 	for attempt := 1; ; attempt++ {
 		select {
 		case <-interrupt:
@@ -219,8 +224,18 @@ func reconnect(cfg Config, previous registrationResponse, reason string, state *
 			lastErr = msg
 			logNotice(fmt.Sprintf("Reconnect failed: %s. Still retrying...", msg))
 		}
-		delay = min(delay*2, reconnectMaxDelay)
+		delay = nextReconnectDelay(delay, time.Since(lostAt))
 	}
+}
+
+// nextReconnectDelay keeps retries quick for the first minute after a drop,
+// then doubles the wait up to reconnectMaxDelay so a long outage (offline
+// laptop) costs almost nothing.
+func nextReconnectDelay(delay, sinceLost time.Duration) time.Duration {
+	if sinceLost < fastRetryWindow {
+		return fastRetryDelay
+	}
+	return min(max(delay, fastRetryDelay)*2, reconnectMaxDelay)
 }
 
 // errText drops the trailing period Windows puts on socket errors, so notices

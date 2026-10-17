@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/yamux"
 )
@@ -47,5 +48,22 @@ func TestDisconnectReason(t *testing.T) {
 		if got := disconnectReason(c.err); got != c.want {
 			t.Errorf("disconnectReason(%v) = %q, want %q", c.err, got, c.want)
 		}
+	}
+}
+
+func TestNextReconnectDelay(t *testing.T) {
+	// First minute: steady quick retries.
+	if got := nextReconnectDelay(reconnectMinDelay, 5*time.Second); got != fastRetryDelay {
+		t.Fatalf("early retry delay = %v, want %v", got, fastRetryDelay)
+	}
+	if got := nextReconnectDelay(fastRetryDelay, 59*time.Second); got != fastRetryDelay {
+		t.Fatalf("retry delay at 59s = %v, want %v", got, fastRetryDelay)
+	}
+	// After that: double up to the cap.
+	if got := nextReconnectDelay(fastRetryDelay, 61*time.Second); got != 2*fastRetryDelay {
+		t.Fatalf("first slow delay = %v, want %v", got, 2*fastRetryDelay)
+	}
+	if got := nextReconnectDelay(24*time.Second, 5*time.Minute); got != reconnectMaxDelay {
+		t.Fatalf("capped delay = %v, want %v", got, reconnectMaxDelay)
 	}
 }
