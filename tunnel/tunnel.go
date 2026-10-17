@@ -3,7 +3,7 @@ package tunnel
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,9 +13,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/hashicorp/yamux"
-	"github.com/muhammad-deve/server/cmd/config"
 )
 
 type Config struct {
@@ -32,6 +29,10 @@ type registrationRequest struct {
 	Subdomain string `json:"subdomain,omitempty"`
 	Reset     bool   `json:"reset,omitempty"`
 	Token     string `json:"token,omitempty"`
+	// Resume asks for the subdomain held before the connection dropped. Servers
+	// that predate it ignore the field and fall back to the account's latest
+	// tunnel.
+	Resume string `json:"resume,omitempty"`
 }
 
 type registrationResponse struct {
@@ -41,45 +42,25 @@ type registrationResponse struct {
 }
 
 const (
-	ansiReset = "\x1b[0m"
-	ansiBold  = "\x1b[1m"
-	ansiGray  = "\x1b[90m"
-	ansiGreen = "\x1b[38;2;48;242;148m"
-	ansiWhite = "\x1b[97m"
+	ansiReset  = "\x1b[0m"
+	ansiBold   = "\x1b[1m"
+	ansiGray   = "\x1b[90m"
+	ansiGreen  = "\x1b[38;2;48;242;148m"
+	ansiWhite  = "\x1b[97m"
+	ansiYellow = "\x1b[33m"
 )
 
 func Start(cfg Config) {
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(interrupt)
+
+	// The first registration fails fast so a bad token, plan, or name is
+	// reported straight away instead of retried.
 	start := time.Now()
-	conn, err := net.Dial("tcp", config.ServerAddr)
+	conn, resp, err := register(cfg, "")
 	if err != nil {
-		fmt.Println("error connecting to server:", err)
-		return
-	}
-	defer conn.Close()
-
-	req := registrationRequest{
-		Type:      cfg.Type,
-		Port:      cfg.Port,
-		Subdomain: cfg.Subdomain,
-		Reset:     cfg.Reset,
-		Token:     config.Token,
-	}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		fmt.Println("error sending tunnel request:", err)
-		return
-	}
-
-	var resp registrationResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		fmt.Println("error reading tunnel response:", err)
-		return
-	}
-	if resp.Error != "" {
-		fmt.Println(resp.Error)
-		return
-	}
-	if resp.URL == "" {
-		fmt.Println("server error: empty tunnel url")
+		fmt.Println(err)
 		return
 	}
 
@@ -101,43 +82,25 @@ func Start(cfg Config) {
 	startTerminalUI(cfg, resp, latency, dashboardPort)
 	defer stopTerminalUI()
 
-	// Wrap the raw tunnel connection so every byte flowing through the tunnel
-	// (in both directions, including framing) is counted for the dashboard.
-	var tunnelConn net.Conn = conn
-	if state != nil {
-		tunnelConn = newCountingConn(conn, state.store.bytesCounter())
-	}
+	// A dropped connection (network blip, laptop sleep, server restart) used
+	// to end the CLI for good. Now the tunnel reconnects and keeps its URL.
+	for {
+		err := serve(conn, cfg, state, interrupt)
+		if err == nil {
+			return
+		}
+		updateTunnelStatus(state, "connecting", "", 0)
+		logNotice(fmt.Sprintf("Connection lost: %s. Reconnecting...", errText(err)))
 
-	session, err := yamux.Client(tunnelConn, nil)
-	if err != nil {
-		stopTerminalUI()
-		fmt.Println("error starting tunnel session:", err)
-		return
-	}
-	defer session.Close()
-
-	done := make(chan error, 1)
-	go func() {
-		for {
-			stream, err := session.Accept()
-			if err != nil {
-				done <- err
+		conn, resp, err = reconnect(cfg, resp, state, interrupt)
+		if err != nil {
+			if errors.Is(err, errInterrupted) {
 				return
 			}
-			go handleStream(stream, cfg.Port, state)
+			stopTerminalUI()
+			fmt.Println("tunnel stopped:", err)
+			return
 		}
-	}()
-
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(interrupt)
-
-	select {
-	case <-interrupt:
-		session.Close()
-	case err := <-done:
-		stopTerminalUI()
-		fmt.Println("server closed connection:", err)
 	}
 }
 

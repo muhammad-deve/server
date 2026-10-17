@@ -110,6 +110,29 @@ func (ui *terminalUI) clear() {
 	fmt.Print("\033[H\033[2J\033[3J")
 }
 
+// logNotice prints a connection status line (lost, reconnecting, reconnected)
+// in the request stream, so the user sees why requests paused.
+func logNotice(msg string) {
+	line := fmt.Sprintf("%s%-10s%s %s%s%s\n", ansiGray, time.Now().Format("15:04:05"), ansiReset, ansiYellow, msg, ansiReset)
+
+	terminalUIMu.RLock()
+	ui := activeTerminalUI
+	closed := terminalUIClosed
+	terminalUIMu.RUnlock()
+
+	if ui != nil {
+		ui.mu.Lock()
+		defer ui.mu.Unlock()
+		if !ui.stopped {
+			fmt.Print(line)
+		}
+		return
+	}
+	if !closed {
+		fmt.Print(line)
+	}
+}
+
 func printRequestLine(req terminalRequestLine) {
 	terminalUIMu.RLock()
 	closed := terminalUIClosed
