@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
@@ -73,6 +74,7 @@ func (p *planWatcher) fetch(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "goport/"+Version+" ("+runtime.GOOS+"/"+runtime.GOARCH+")")
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {

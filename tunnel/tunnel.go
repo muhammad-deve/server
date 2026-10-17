@@ -33,6 +33,16 @@ type registrationRequest struct {
 	// that predate it ignore the field and fall back to the account's latest
 	// tunnel.
 	Resume string `json:"resume,omitempty"`
+
+	// About this install, so the server can tell which versions and systems
+	// are in use. No paths, hostnames or local addresses are sent.
+	Version string `json:"version,omitempty"`
+	OS      string `json:"os,omitempty"`
+	Arch    string `json:"arch,omitempty"`
+	Install string `json:"install,omitempty"`
+	// ReconnectReason is set on a reconnect: why the last connection ended,
+	// as one of a few fixed words (never the raw error, which has IPs in it).
+	ReconnectReason string `json:"reconnect_reason,omitempty"`
 }
 
 type registrationResponse struct {
@@ -58,7 +68,7 @@ func Start(cfg Config) {
 	// The first registration fails fast so a bad token, plan, or name is
 	// reported straight away instead of retried.
 	start := time.Now()
-	conn, resp, err := register(cfg, "")
+	conn, resp, err := register(cfg, "", "")
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -92,7 +102,7 @@ func Start(cfg Config) {
 		updateTunnelStatus(state, "connecting", "", 0)
 		logNotice(fmt.Sprintf("Connection lost: %s. Reconnecting...", errText(err)))
 
-		conn, resp, err = reconnect(cfg, resp, state, interrupt)
+		conn, resp, err = reconnect(cfg, resp, disconnectReason(err), state, interrupt)
 		if err != nil {
 			if errors.Is(err, errInterrupted) {
 				return

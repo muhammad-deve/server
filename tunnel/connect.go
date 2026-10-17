@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -73,7 +74,9 @@ func sessionConfig() *yamux.Config {
 
 // register dials the server and claims a tunnel. resume is the subdomain held
 // before a dropped connection; it is empty on the first start.
-func register(cfg Config, resume string) (net.Conn, registrationResponse, error) {
+// reconnectReason says why the previous connection ended; it is empty on
+// the first start.
+func register(cfg Config, resume, reconnectReason string) (net.Conn, registrationResponse, error) {
 	conn, err := net.DialTimeout("tcp", config.ServerAddr, dialTimeout)
 	if err != nil {
 		return nil, registrationResponse{}, fmt.Errorf("error connecting to server: %w", err)
@@ -89,6 +92,12 @@ func register(cfg Config, resume string) (net.Conn, registrationResponse, error)
 		Reset:  cfg.Reset && resume == "",
 		Token:  config.Token,
 		Resume: resume,
+
+		Version:         Version,
+		OS:              runtime.GOOS,
+		Arch:            runtime.GOARCH,
+		Install:         installMethod(),
+		ReconnectReason: reconnectReason,
 	}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		conn.Close()
@@ -177,7 +186,7 @@ func serve(conn net.Conn, cfg Config, state *dashboardState, interrupt <-chan os
 // until it succeeds, the server refuses for good, or the user presses Ctrl+C.
 // It never gives up on network errors: a laptop may sleep or lose Wi-Fi for
 // hours and should come back on its own.
-func reconnect(cfg Config, previous registrationResponse, state *dashboardState, interrupt <-chan os.Signal) (net.Conn, registrationResponse, error) {
+func reconnect(cfg Config, previous registrationResponse, reason string, state *dashboardState, interrupt <-chan os.Signal) (net.Conn, registrationResponse, error) {
 	delay := reconnectMinDelay
 	lastErr := ""
 	for attempt := 1; ; attempt++ {
@@ -188,7 +197,7 @@ func reconnect(cfg Config, previous registrationResponse, state *dashboardState,
 		}
 
 		start := time.Now()
-		conn, resp, err := register(cfg, previous.Subdomain)
+		conn, resp, err := register(cfg, previous.Subdomain, reason)
 		if err == nil {
 			if resp.URL != previous.URL {
 				logNotice("Reconnected with a new public URL: " + resp.URL)

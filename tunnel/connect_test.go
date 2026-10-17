@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -83,7 +84,7 @@ func TestRegisterKeepsBytesSentRightAfterResponse(t *testing.T) {
 	// The response and the start of the first yamux frame arrive in one read.
 	startFakeServer(t, `{"subdomain":"abc123","url":"https://abc123.goport.uz"}`+"\nYAMUX")
 
-	conn, resp, err := register(Config{Port: "3000", Type: "http"}, "")
+	conn, resp, err := register(Config{Port: "3000", Type: "http"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +113,7 @@ func TestReconnectAsksForTheSameSubdomain(t *testing.T) {
 
 	cfg := Config{Port: "3000", Type: "http", Reset: true}
 	previous := registrationResponse{Subdomain: "abc123", URL: "https://abc123.goport.uz"}
-	conn, resp, err := reconnect(cfg, previous, nil, make(chan os.Signal))
+	conn, resp, err := reconnect(cfg, previous, "server_closed", nil, make(chan os.Signal))
 	if err != nil {
 		t.Fatalf("reconnect() error = %v", err)
 	}
@@ -129,13 +130,19 @@ func TestReconnectAsksForTheSameSubdomain(t *testing.T) {
 		if req.Reset {
 			t.Errorf("attempt %d: --reset must not be resent on a reconnect", attempt)
 		}
+		if req.ReconnectReason != "server_closed" {
+			t.Errorf("attempt %d: reconnect_reason = %q, want server_closed", attempt, req.ReconnectReason)
+		}
+		if req.Version != Version || req.OS != runtime.GOOS || req.Arch != runtime.GOARCH || req.Install == "" {
+			t.Errorf("attempt %d: client details = %q %q %q %q", attempt, req.Version, req.OS, req.Arch, req.Install)
+		}
 	}
 }
 
 func TestReconnectStopsWhenTheServerRefusesForGood(t *testing.T) {
 	startFakeServer(t, `{"error":"failed to register tunnel: authentication required: run goport auth"}`+"\n")
 
-	_, _, err := reconnect(Config{Port: "3000", Type: "http"}, registrationResponse{Subdomain: "abc123"}, nil, make(chan os.Signal))
+	_, _, err := reconnect(Config{Port: "3000", Type: "http"}, registrationResponse{Subdomain: "abc123"}, "", nil, make(chan os.Signal))
 	var refused *registrationError
 	if !errors.As(err, &refused) {
 		t.Fatalf("reconnect() error = %v, want a registration error", err)
@@ -146,7 +153,7 @@ func TestReconnectStopsOnInterrupt(t *testing.T) {
 	interrupt := make(chan os.Signal, 1)
 	interrupt <- os.Interrupt
 
-	_, _, err := reconnect(Config{Port: "3000", Type: "http"}, registrationResponse{Subdomain: "abc123"}, nil, interrupt)
+	_, _, err := reconnect(Config{Port: "3000", Type: "http"}, registrationResponse{Subdomain: "abc123"}, "", nil, interrupt)
 	if !errors.Is(err, errInterrupted) {
 		t.Fatalf("reconnect() error = %v, want errInterrupted", err)
 	}
