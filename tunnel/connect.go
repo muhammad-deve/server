@@ -102,6 +102,10 @@ func register(cfg Config, resume, reconnectReason string) (net.Conn, registratio
 		Arch:            runtime.GOARCH,
 		Install:         installMethod(),
 		ReconnectReason: reconnectReason,
+		ShareToken:      cfg.ShareToken,
+	}
+	if !cfg.ExpiresAt.IsZero() {
+		req.ExpiresAt = cfg.ExpiresAt.Unix()
 	}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		conn.Close()

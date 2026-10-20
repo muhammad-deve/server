@@ -16,11 +16,15 @@ import (
 )
 
 type Config struct {
-	Port      string
-	Subdomain string
-	Reset     bool
-	Region    string
-	Type      string
+	Port             string
+	Subdomain        string
+	Reset            bool
+	Region           string
+	Type             string
+	ShareToken       string
+	ExpiresAt        time.Time
+	DisableInspector bool
+	ShareName        string
 }
 
 type registrationRequest struct {
@@ -43,6 +47,8 @@ type registrationRequest struct {
 	// ReconnectReason is set on a reconnect: why the last connection ended,
 	// as one of a few fixed words (never the raw error, which has IPs in it).
 	ReconnectReason string `json:"reconnect_reason,omitempty"`
+	ShareToken      string `json:"share_token,omitempty"`
+	ExpiresAt       int64  `json:"expires_at,omitempty"`
 }
 
 type registrationResponse struct {
@@ -61,22 +67,40 @@ const (
 )
 
 func Start(cfg Config) {
+	if err := StartE(cfg); err != nil {
+		fmt.Println(err)
+	}
+}
+
+func StartE(cfg Config) error {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(interrupt)
+	if !cfg.ExpiresAt.IsZero() {
+		timer := time.NewTimer(time.Until(cfg.ExpiresAt))
+		defer timer.Stop()
+		go func() {
+			<-timer.C
+			interrupt <- syscall.SIGTERM
+		}()
+	}
 
 	// The first registration fails fast so a bad token, plan, or name is
 	// reported straight away instead of retried.
 	start := time.Now()
 	conn, resp, err := register(cfg, "", "")
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 
-	state, dashboardPort, dashErr := startDashboard(cfg.Port)
-	if dashErr != nil {
-		fmt.Println("warning: could not start dashboard:", dashErr)
+	var state *dashboardState
+	var dashboardPort int
+	if !cfg.DisableInspector {
+		var dashErr error
+		state, dashboardPort, dashErr = startDashboard(cfg.Port)
+		if dashErr != nil {
+			fmt.Println("warning: could not start dashboard:", dashErr)
+		}
 	}
 	latency := time.Since(start)
 	if state != nil {
@@ -97,7 +121,7 @@ func Start(cfg Config) {
 	for {
 		err := serve(conn, cfg, state, interrupt)
 		if err == nil {
-			return
+			return nil
 		}
 		updateTunnelStatus(state, "connecting", "", 0)
 		logNotice(fmt.Sprintf("Connection lost: %s. Reconnecting...", errText(err)))
@@ -105,11 +129,11 @@ func Start(cfg Config) {
 		conn, resp, err = reconnect(cfg, resp, disconnectReason(err), state, interrupt)
 		if err != nil {
 			if errors.Is(err, errInterrupted) {
-				return
+				return nil
 			}
 			stopTerminalUI()
 			fmt.Println("tunnel stopped:", err)
-			return
+			return err
 		}
 	}
 }
@@ -126,10 +150,10 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 	}
 	defer req.Body.Close()
 
-	// Buffer the request body so we can both forward it and capture it for the dashboard.
-	// Read the full body so uploads aren't truncated; we only truncate the stored copy.
+	// The inspector needs a replayable copy. Share tunnels disable it, so large
+	// request and response bodies remain streaming instead of accumulating in RAM.
 	var reqBodyBytes []byte
-	if req.Body != nil && req.Body != http.NoBody {
+	if state != nil && req.Body != nil && req.Body != http.NoBody {
 		reqBodyBytes, _ = io.ReadAll(req.Body)
 	}
 	reqHeaders := flattenHeaders(req.Header)
@@ -165,7 +189,7 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 	}
 
 	// Restore the body we buffered so req.Write can resend it.
-	if reqBodyBytes != nil {
+	if state != nil && reqBodyBytes != nil {
 		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
 		req.ContentLength = int64(len(reqBodyBytes))
 	}
@@ -203,6 +227,16 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 		return
 	}
 	defer resp.Body.Close()
+	if state == nil {
+		logRequest(method, pathStr, resp.StatusCode, http.StatusText(resp.StatusCode))
+		stripHopByHop(resp.Header)
+		resp.Close = true
+		resp.Header.Set("Connection", "close")
+		if err := resp.Write(stream); err != nil && !isClosedConnErr(err) {
+			fmt.Println("error writing tunnel response:", err)
+		}
+		return
+	}
 
 	// Buffer the response body so we can both forward it and capture it.
 	// Read the full body so the browser receives intact assets; truncate only the stored copy.
@@ -412,6 +446,9 @@ func regionLabel(region string) string {
 }
 
 func commandLine(cfg Config) string {
+	if cfg.Type == "share" {
+		return "goport share " + cfg.ShareName
+	}
 	cmd := fmt.Sprintf("goport %s %s", cfg.Type, cfg.Port)
 	if cfg.Reset {
 		cmd += " --reset"

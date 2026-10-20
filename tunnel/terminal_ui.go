@@ -175,6 +175,18 @@ func writeRequestLine(out *strings.Builder, req terminalRequestLine) {
 
 func buildTerminalDashboard(cfg Config, resp registrationResponse, latency time.Duration, dashboardPort int) string {
 	var out strings.Builder
+	if cfg.Type == "share" {
+		fmt.Fprintf(&out, "%s%sGoPort Share%s\n\n", ansiBold, ansiWhite, ansiReset)
+		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Sharing", ansiReset, ansiBold+ansiWhite, cfg.ShareName, ansiReset)
+		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Public URL", ansiReset, ansiGreen, resp.URL, ansiReset)
+		fmt.Fprintf(&out, "%s%-16s%s %sActive%s %s(%dms)%s\n", ansiGray, "Status", ansiReset, ansiGreen, ansiReset, ansiGray, latency.Milliseconds(), ansiReset)
+		if !cfg.ExpiresAt.IsZero() {
+			fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Expires", ansiReset, ansiBold+ansiWhite, cfg.ExpiresAt.Local().Format(time.RFC1123), ansiReset)
+		}
+		out.WriteString("\nFiles stay on this computer and are public through the link above.\n")
+		out.WriteString("Press Ctrl+C to stop sharing immediately.\n")
+		return out.String()
+	}
 	dashboardAddr := "http://127.0.0.1:" + strconv.Itoa(dashboardPort)
 	fmt.Fprintf(&out, "%s$%s %s%s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, commandLine(cfg), ansiReset)
 	out.WriteByte('\n')
