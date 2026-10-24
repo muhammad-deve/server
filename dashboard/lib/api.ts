@@ -1,15 +1,14 @@
 import { HttpRequest, RequestDetails, TunnelData, HttpMethod } from "./types"
 
-// API client talks to the embedded Go server at the same origin the dashboard is served from.
-// In dev (next dev) this falls back to localhost:4040 so you can iterate on the UI.
+// The inspector API is always same-origin: each CLI serves this UI on its own
+// port (4040-4139), and it refuses requests from any other origin.
 function apiBase(): string {
-  if (typeof window === "undefined") return ""
-  if (window.location.port === "4040" || window.location.port.startsWith("404")) {
-    return ""
-  }
-  // Dev mode (e.g. next dev on 3000): hit the running goport dashboard.
-  return "http://127.0.0.1:4040"
+  return ""
 }
+
+// Required by the CLI on requests that change something. Another site can't
+// send it without a CORS preflight, which the CLI never allows.
+const WRITE_HEADERS = { "X-GoPort-Inspector": "1" }
 
 interface RawCapturedRequest {
   id: string
@@ -95,7 +94,7 @@ export async function fetchRequests(): Promise<HttpRequest[]> {
 export async function fetchRequestDetails(id: string): Promise<RequestDetails> {
   const cached = detailsCache.get(id)
   if (cached) return cached
-  const res = await fetch(`${apiBase()}/api/requests/${id}`)
+  const res = await fetch(`${apiBase()}/api/requests/${encodeURIComponent(id)}`)
   if (!res.ok) throw new Error(`details fetch failed: ${res.status}`)
   const raw: RawCapturedRequest = await res.json()
   const details = toRequestDetails(raw)
@@ -104,13 +103,14 @@ export async function fetchRequestDetails(id: string): Promise<RequestDetails> {
 }
 
 export async function clearRequests(): Promise<void> {
-  await fetch(`${apiBase()}/api/requests`, { method: "DELETE" })
+  await fetch(`${apiBase()}/api/requests`, { method: "DELETE", headers: WRITE_HEADERS })
   detailsCache.clear()
 }
 
 export async function replayRequest(id: string): Promise<HttpRequest> {
-  const res = await fetch(`${apiBase()}/api/requests/${id}/replay`, {
+  const res = await fetch(`${apiBase()}/api/requests/${encodeURIComponent(id)}/replay`, {
     method: "POST",
+    headers: WRITE_HEADERS,
     // The target is localhost, so 15s is already generous. Without a signal a
     // local app that accepts the socket and never answers hangs the UI forever.
     signal: AbortSignal.timeout(15_000),

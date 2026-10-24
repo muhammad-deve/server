@@ -7,6 +7,7 @@ import { MethodBadge, StatusBadge } from "./badges"
 import { CodeBlock, HeadersBlock, CurlBlock } from "./code-block"
 import { CopyButton } from "./copy-button"
 import { fetchRequestDetails } from "@/lib/api"
+import { curlCommand } from "@/lib/curl"
 
 type Tab = "request" | "response" | "curl"
 
@@ -17,27 +18,22 @@ const TABS: { id: Tab; label: string }[] = [
 ]
 
 /**
- * POSIX single-quoting. Header values and bodies are attacker-controlled, and
- * the result is a command the developer pastes into their own shell -- double
- * quotes would let `$(...)` in a header execute on their machine.
+ * Header values and bodies are attacker-controlled, and the result is pasted
+ * into the developer's own shell, so lib/curl quotes every value for the shell
+ * it will land in: POSIX shells, or PowerShell on Windows.
  */
-const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
-
 function generateCurlCommand(request: HttpRequest, details: RequestDetails, tunnelUrl: string): string {
-  const url = `${tunnelUrl || ""}${request.path}`
-  const lines: string[] = [
-    request.method === "GET" ? `curl ${shellQuote(url)}` : `curl -X ${request.method} ${shellQuote(url)}`,
-  ]
-
+  const headers: [string, string][] = []
   for (const header of ["Content-Type", "Authorization", "Accept"]) {
     const value = details.request.headers[header]
-    if (value) lines.push(`  -H ${shellQuote(`${header}: ${value}`)}`)
+    if (value) headers.push([header, value])
   }
-
-  const body = details.request.body?.trim()
-  if (body) lines.push(`  -d ${shellQuote(body)}`)
-
-  return lines.join(" \\\n")
+  return curlCommand({
+    method: request.method,
+    url: `${tunnelUrl || ""}${request.path}`,
+    headers,
+    body: details.request.body?.trim(),
+  })
 }
 
 /*

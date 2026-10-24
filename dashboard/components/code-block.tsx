@@ -153,8 +153,8 @@ export function HeadersBlock({ headers }: { headers: Record<string, string> }) {
 /** Same rule as the JSON path: escape first, then decorate. */
 function highlightCurl(cmd: string) {
   return escapeHtml(cmd)
-    .replace(/^curl/, '<span class="curl-cmd">curl</span>')
-    .replace(/(^|\s)(-X|-H|-d)(\s)/g, '$1<span class="curl-flag">$2</span>$3')
+    .replace(/(^|\s)(curl(?:\.exe)?)(?=\s)/, '$1<span class="curl-cmd">$2</span>')
+    .replace(/(^|\s)(-X|-H|-d|--data-raw|--data-binary)(\s)/g, '$1<span class="curl-flag">$2</span>$3')
 }
 
 export function CurlBlock({ curl }: { curl: string }) {
