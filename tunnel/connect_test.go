@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,11 +25,35 @@ func TestRegistrationErrorPermanent(t *testing.T) {
 		`subdomain "abc123" is already connected`:                                                               false,
 		"failed to register tunnel: could not verify your subscription or monthly usage":                        false,
 		"your plan allows up to 1 active tunnels; stop one or upgrade at https://goport.uz/dashboard#billing":   false,
+		"failed to register tunnel: subdomain cannot be used: it belongs to another account":                    true,
+		"failed to register tunnel: subdomain cannot be resumed: the tunnel was stopped from the dashboard":     true,
+		"failed to register tunnel: too many tunnel registrations, try again in a minute":                       false,
 	}
 	for msg, want := range cases {
 		if got := (&registrationError{msg: msg}).permanent(); got != want {
 			t.Errorf("permanent(%q) = %v, want %v", msg, got, want)
 		}
+	}
+	if !(&registrationError{msg: "too many tunnel registrations, try again in a minute"}).rateLimited() {
+		t.Error("rate limit refusal not recognised")
+	}
+}
+
+func TestReconnectEndsWhenStoppedFromTheDashboard(t *testing.T) {
+	startFakeServer(t, `{"error":"failed to register tunnel: subdomain cannot be resumed: the tunnel was stopped from the dashboard"}`+"\n")
+
+	_, _, err := reconnect(Config{Port: "3000", Type: "http"}, registrationResponse{Subdomain: "abc123"}, "", nil, make(chan os.Signal))
+	if !errors.Is(err, errStoppedFromDashboard) {
+		t.Fatalf("reconnect() error = %v, want errStoppedFromDashboard", err)
+	}
+}
+
+func TestRegisterEscapesServerText(t *testing.T) {
+	startFakeServer(t, `{"error":"bad \u001b]0;owned\u0007 request"}`+"\n")
+
+	_, _, err := register(Config{Port: "3000", Type: "http"}, "", "")
+	if err == nil || strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Fatalf("register() error = %q, want escaped text", err)
 	}
 }
 

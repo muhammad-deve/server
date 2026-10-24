@@ -11,6 +11,7 @@ var (
 	customSubdomain string
 	resetSubdomain  bool
 	region          string
+	inspect         bool
 )
 
 var httpCmd = &cobra.Command{
@@ -21,16 +22,21 @@ var httpCmd = &cobra.Command{
 		if resetSubdomain && customSubdomain != "" {
 			return fmt.Errorf("--reset and --custom cannot be used together")
 		}
+		port, err := parsePort(args[0])
+		if err != nil {
+			return err
+		}
 
-		port := args[0]
-		tunnel.Start(tunnel.Config{
-			Port:      port,
-			Subdomain: customSubdomain,
-			Reset:     resetSubdomain,
-			Region:    region,
-			Type:      "http",
+		// From here on errors are runtime failures, not usage mistakes.
+		cmd.SilenceUsage = true
+		return tunnel.StartE(tunnel.Config{
+			Port:             port,
+			Subdomain:        customSubdomain,
+			Reset:            resetSubdomain,
+			Region:           region,
+			Type:             "http",
+			DisableInspector: !inspect,
 		})
-		return nil
 	},
 }
 
@@ -40,4 +46,5 @@ func init() {
 	httpCmd.Flags().StringVarP(&customSubdomain, "name", "n", "", "custom subdomain")
 	httpCmd.Flags().BoolVar(&resetSubdomain, "reset", false, "get a new random subdomain")
 	httpCmd.Flags().StringVarP(&region, "region", "r", "eu", "region")
+	httpCmd.Flags().BoolVar(&inspect, "inspect", true, "run the local request inspector (--inspect=false turns it off)")
 }

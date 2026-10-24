@@ -2,7 +2,6 @@ package tunnel
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/hashicorp/yamux"
 )
 
 type Config struct {
@@ -57,21 +58,29 @@ type registrationResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
-const (
+// Terminal styling. SetupTerminal blanks these when the console can't show
+// escape codes.
+var (
 	ansiReset  = "\x1b[0m"
 	ansiBold   = "\x1b[1m"
 	ansiGray   = "\x1b[90m"
 	ansiGreen  = "\x1b[38;2;48;242;148m"
 	ansiWhite  = "\x1b[97m"
 	ansiYellow = "\x1b[33m"
+	// ansiClear wipes the screen and scrollback and moves the cursor home.
+	ansiClear = "\x1b[H\x1b[2J\x1b[3J"
 )
 
-func Start(cfg Config) {
-	if err := StartE(cfg); err != nil {
-		fmt.Println(err)
+// SetupTerminal turns on escape-code support in the Windows console. Where
+// that isn't possible, output stays plain.
+func SetupTerminal() {
+	if !enableVirtualTerminal() {
+		ansiReset, ansiBold, ansiGray, ansiGreen, ansiWhite, ansiYellow, ansiClear = "", "", "", "", "", "", ""
 	}
 }
 
+// StartE runs a tunnel until the user stops it. It returns an error when the
+// tunnel could not start or stopped for good.
 func StartE(cfg Config) error {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
@@ -93,11 +102,12 @@ func StartE(cfg Config) error {
 		return err
 	}
 
+	local := newLocalTarget(cfg.Port)
 	var state *dashboardState
 	var dashboardPort int
 	if !cfg.DisableInspector {
 		var dashErr error
-		state, dashboardPort, dashErr = startDashboard(cfg.Port)
+		state, dashboardPort, dashErr = startDashboard(local)
 		if dashErr != nil {
 			fmt.Println("warning: could not start dashboard:", dashErr)
 		}
@@ -119,7 +129,7 @@ func StartE(cfg Config) error {
 	// A dropped connection (network blip, laptop sleep, server restart) used
 	// to end the CLI for good. Now the tunnel reconnects and keeps its URL.
 	for {
-		err := serve(conn, cfg, state, interrupt)
+		err := serve(conn, cfg, local, state, interrupt)
 		if err == nil {
 			return nil
 		}
@@ -132,41 +142,61 @@ func StartE(cfg Config) error {
 				return nil
 			}
 			stopTerminalUI()
-			fmt.Println("tunnel stopped:", err)
-			return err
+			if errors.Is(err, errStoppedFromDashboard) {
+				fmt.Println("Tunnel stopped from the dashboard.")
+				return nil
+			}
+			return fmt.Errorf("tunnel stopped: %w", err)
 		}
 	}
 }
 
-func handleStream(stream net.Conn, port string, state *dashboardState) {
+// badGatewayBody is what visitors see when the local app can't be reached.
+// The reason (port, OS error) is printed in the CLI only.
+const badGatewayBody = "The local app didn't respond. If this is your tunnel, check that your app is running and look at the GoPort terminal for details.\n"
+
+func handleStream(stream net.Conn, local *localTarget, state *dashboardState) {
 	defer stream.Close()
+	// One bad request must not take the whole tunnel down.
+	defer func() {
+		if r := recover(); r != nil {
+			logNotice(fmt.Sprintf("Internal error while handling a request: %v", r))
+		}
+	}()
 	startTime := time.Now()
 
 	bufStream := bufio.NewReader(stream)
 	req, err := http.ReadRequest(bufStream)
 	if err != nil {
-		writeError(stream, http.StatusBadRequest, fmt.Sprintf("failed to read request: %v", err))
+		writeError(stream, http.StatusBadRequest, "Bad request.\n")
 		return
 	}
 	defer req.Body.Close()
 
-	// The inspector needs a replayable copy. Share tunnels disable it, so large
-	// request and response bodies remain streaming instead of accumulating in RAM.
-	var reqBodyBytes []byte
-	if state != nil && req.Body != nil && req.Body != http.NoBody {
-		reqBodyBytes, _ = io.ReadAll(req.Body)
-	}
 	reqHeaders := flattenHeaders(req.Header)
 	method := req.Method
 	pathStr := req.URL.RequestURI()
 	isUpgradeRequest := isUpgrade(req)
 
-	localAddr := "127.0.0.1:" + port
-	localConn, err := net.Dial("tcp", localAddr)
+	// Bodies stream through in both directions. The inspector keeps only the
+	// first maxBodySize bytes of each, so streaming responses (SSE, long-poll)
+	// reach the visitor right away and large bodies don't sit in RAM.
+	var reqBody *bodyCapture
+	if state != nil && !isUpgradeRequest && req.Body != nil && req.Body != http.NoBody {
+		reqBody = newBodyCapture(maxBodySize)
+		req.Body = captureBody(req.Body, reqBody)
+	}
+
+	localConn, localAddr, err := local.dial()
 	if err != nil {
+		// Keep a small body so the request can be replayed once the app is up.
+		if reqBody != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(req.Body, maxBodySize+1))
+		}
+		local.reportFailure(err)
 		logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
-		captureFailed(state, method, pathStr, reqHeaders, reqBodyBytes, http.StatusBadGateway, fmt.Sprintf("failed to connect to %s: %v", localAddr, err), time.Since(startTime))
-		writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to connect to %s: %v", localAddr, err))
+		captureFailed(state, method, pathStr, reqHeaders, reqBody, fmt.Sprintf("failed to connect to %s: %v", localAddr, err), time.Since(startTime))
+		writeError(stream, http.StatusBadGateway, badGatewayBody)
 		return
 	}
 	defer localConn.Close()
@@ -188,19 +218,15 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 		stripHopByHop(req.Header)
 	}
 
-	// Restore the body we buffered so req.Write can resend it.
-	if state != nil && reqBodyBytes != nil {
-		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
-		req.ContentLength = int64(len(reqBodyBytes))
-	}
-
 	// Detect Upgrade requests (e.g. WebSocket) and run a raw bidirectional copy.
 	if isUpgradeRequest {
 		if err := req.Write(localConn); err != nil {
+			local.reportFailure(err)
 			logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
-			writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to forward upgrade request: %v", err))
+			writeError(stream, http.StatusBadGateway, badGatewayBody)
 			return
 		}
+		local.reportSuccess()
 		logRequest(method, pathStr, http.StatusSwitchingProtocols, "Upgrade")
 		// Splice any data already buffered in bufStream first, then continue copying both ways.
 		if n := bufStream.Buffered(); n > 0 {
@@ -212,81 +238,92 @@ func handleStream(stream net.Conn, port string, state *dashboardState) {
 		return
 	}
 
-	if err := req.Write(localConn); err != nil {
-		logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
-		captureFailed(state, method, pathStr, reqHeaders, reqBodyBytes, http.StatusBadGateway, fmt.Sprintf("failed to forward: %v", err), time.Since(startTime))
-		writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to forward request: %v", err))
-		return
+	// Send the request while reading the response, so an app that answers
+	// before reading the whole body (401, 413) is relayed instead of turning
+	// into a 502 when it closes the connection.
+	var body *watchedBody
+	if req.Body != nil && req.Body != http.NoBody {
+		body = &watchedBody{ReadCloser: req.Body}
+		req.Body = body
 	}
+	writeErr := make(chan error, 1)
+	go func() {
+		err := req.Write(localConn)
+		if err != nil && body.failed() {
+			// The visitor went away mid-upload; the app won't answer half a request.
+			localConn.Close()
+		}
+		writeErr <- err
+	}()
 
 	resp, err := http.ReadResponse(bufio.NewReader(localConn), req)
 	if err != nil {
+		select {
+		case werr := <-writeErr:
+			if werr != nil {
+				err = werr
+			}
+		default:
+		}
+		local.reportFailure(err)
 		logRequest(method, pathStr, http.StatusBadGateway, http.StatusText(http.StatusBadGateway))
-		captureFailed(state, method, pathStr, reqHeaders, reqBodyBytes, http.StatusBadGateway, fmt.Sprintf("failed to read response: %v", err), time.Since(startTime))
-		writeError(stream, http.StatusBadGateway, fmt.Sprintf("failed to read local response: %v", err))
+		captureFailed(state, method, pathStr, reqHeaders, reqBody, fmt.Sprintf("failed to read response: %v", err), time.Since(startTime))
+		writeError(stream, http.StatusBadGateway, badGatewayBody)
 		return
 	}
 	defer resp.Body.Close()
-	if state == nil {
-		logRequest(method, pathStr, resp.StatusCode, http.StatusText(resp.StatusCode))
-		stripHopByHop(resp.Header)
-		resp.Close = true
-		resp.Header.Set("Connection", "close")
-		if err := resp.Write(stream); err != nil && !isClosedConnErr(err) {
-			fmt.Println("error writing tunnel response:", err)
-		}
-		return
-	}
-
-	// Buffer the response body so we can both forward it and capture it.
-	// Read the full body so the browser receives intact assets; truncate only the stored copy.
-	respBodyBytes, _ := io.ReadAll(resp.Body)
+	local.reportSuccess()
 	logRequest(method, pathStr, resp.StatusCode, http.StatusText(resp.StatusCode))
 
-	if state != nil {
-		state.store.Add(&CapturedRequest{
-			ID:         newRequestID(),
-			Timestamp:  startTime,
-			Method:     method,
-			Path:       pathStr,
-			StatusCode: resp.StatusCode,
-			Duration:   time.Since(startTime).Milliseconds(),
-			ReqHeaders: reqHeaders,
-			ReqBody:    truncateBody(reqBodyBytes),
-			ResHeaders: flattenHeaders(resp.Header),
-			ResBody:    truncateBody(respBodyBytes),
-		})
+	resHeaders := flattenHeaders(resp.Header)
+	var resBody *bodyCapture
+	if state != nil && resp.Body != http.NoBody {
+		resBody = newBodyCapture(maxBodySize)
+		resp.Body = captureBody(resp.Body, resBody)
 	}
 
 	stripHopByHop(resp.Header)
 	resp.Close = true
 	resp.Header.Set("Connection", "close")
-	resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
-	resp.ContentLength = int64(len(respBodyBytes))
+	if err := resp.Write(stream); err != nil && !isClosedConnErr(err) {
+		// A visitor closing the page mid-response is normal; anything else is worth a line.
+		logNotice(fmt.Sprintf("Error sending a response for %s: %s", pathStr, errText(err)))
+	}
 
-	if err := resp.Write(stream); err != nil {
-		// Don't print on broken pipe / closed connection — these are normal when the client disconnects.
-		if !isClosedConnErr(err) {
-			fmt.Println("error writing tunnel response:", err)
-		}
+	// The entry is added once the response has finished streaming.
+	if state != nil {
+		state.store.Add(&CapturedRequest{
+			ID:           newRequestID(),
+			Timestamp:    startTime,
+			Method:       method,
+			Path:         pathStr,
+			StatusCode:   resp.StatusCode,
+			Duration:     time.Since(startTime).Milliseconds(),
+			ReqHeaders:   reqHeaders,
+			ReqBody:      reqBody.Text(),
+			ReqTruncated: reqBody.Truncated(),
+			ResHeaders:   resHeaders,
+			ResBody:      resBody.Text(),
+		})
 	}
 }
 
-func captureFailed(state *dashboardState, method, path string, reqHeaders map[string]string, reqBody []byte, statusCode int, message string, dur time.Duration) {
+func captureFailed(state *dashboardState, method, path string, reqHeaders map[string]string, reqBody *bodyCapture, message string, dur time.Duration) {
 	if state == nil {
 		return
 	}
 	state.store.Add(&CapturedRequest{
-		ID:         newRequestID(),
-		Timestamp:  time.Now().Add(-dur),
-		Method:     method,
-		Path:       path,
-		StatusCode: statusCode,
-		Duration:   dur.Milliseconds(),
-		ReqHeaders: reqHeaders,
-		ReqBody:    truncateBody(reqBody),
-		ResHeaders: map[string]string{"Content-Type": "text/plain"},
-		ResBody:    message,
+		ID:           newRequestID(),
+		Timestamp:    time.Now().Add(-dur),
+		Method:       method,
+		Path:         path,
+		StatusCode:   http.StatusBadGateway,
+		Duration:     dur.Milliseconds(),
+		ReqHeaders:   reqHeaders,
+		ReqBody:      reqBody.Text(),
+		ReqTruncated: reqBody.Truncated(),
+		ResHeaders:   map[string]string{"Content-Type": "text/plain"},
+		ResBody:      message,
 	})
 }
 
@@ -369,10 +406,15 @@ func isClosedConnErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A visitor leaving mid-response resets the yamux stream.
+	if errors.Is(err, yamux.ErrConnectionReset) || errors.Is(err, yamux.ErrStreamClosed) || errors.Is(err, yamux.ErrSessionShutdown) {
+		return true
+	}
 	msg := err.Error()
 	return strings.Contains(msg, "use of closed network connection") ||
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "forcibly closed") ||
 		strings.Contains(msg, "EOF")
 }
 
@@ -412,26 +454,6 @@ func logRequest(method, path string, statusCode int, statusText string) {
 	}
 
 	printRequestLine(line)
-}
-
-func printDashboard(cfg Config, resp registrationResponse, latency time.Duration, dashboardPort int) {
-	dashboardAddr := fmt.Sprintf("http://127.0.0.1:%d", dashboardPort)
-	// Clear the entire terminal (visible + scrollback) and reprint the command at
-	// the top so the dashboard sits cleanly without any prior shell output above it.
-	fmt.Print("\033[H\033[2J\033[3J")
-	fmt.Printf("%s$%s %s%s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, commandLine(cfg), ansiReset)
-	fmt.Println()
-	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, dashboardAddr, ansiReset)
-	fmt.Printf("%s%-16s%s %s%s%s\n", ansiGray, "Region", ansiReset, ansiBold+ansiWhite, regionLabel(cfg.Region), ansiReset)
-	fmt.Printf("%s%-16s%s %sonline%s %s(%dms)%s\n", ansiGray, "Status", ansiReset, ansiGreen, ansiReset, ansiGray, latency.Milliseconds(), ansiReset)
-	fmt.Printf("%s%-16s%s %s%s%s %s→%s %s%slocalhost:%s%s\n", ansiGray, "Forwarding", ansiReset, ansiGreen, resp.URL, ansiReset, ansiGray, ansiReset, ansiBold, ansiWhite, cfg.Port, ansiReset)
-	fmt.Println()
-
-	if cfg.Type == "http" {
-		fmt.Printf("%s%sHTTP Requests%s\n", ansiBold, ansiWhite, ansiReset)
-		fmt.Printf("%s-------------%s\n", ansiGray, ansiReset)
-		fmt.Println()
-	}
 }
 
 func regionLabel(region string) string {

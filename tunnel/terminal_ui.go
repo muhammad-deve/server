@@ -91,7 +91,7 @@ func (ui *terminalUI) render() {
 	var out strings.Builder
 	// Clear the visible screen and scrollback for a clean start, then leave the
 	// terminal in the normal buffer so new output scrolls naturally.
-	out.WriteString("\033[H\033[2J\033[3J")
+	out.WriteString(ansiClear)
 	out.WriteString(buildTerminalDashboard(ui.cfg, ui.resp, ui.latency, ui.dashboardPort))
 	fmt.Print(out.String())
 }
@@ -107,13 +107,13 @@ func (ui *terminalUI) clear() {
 	ui.stopped = true
 	// Wipe the visible screen and the scrollback, then move the cursor home so
 	// the prompt returns to a clean terminal after Ctrl+C.
-	fmt.Print("\033[H\033[2J\033[3J")
+	fmt.Print(ansiClear)
 }
 
 // logNotice prints a connection status line (lost, reconnecting, reconnected)
 // in the request stream, so the user sees why requests paused.
 func logNotice(msg string) {
-	line := fmt.Sprintf("%s%-10s%s %s%s%s\n", ansiGray, time.Now().Format("15:04:05"), ansiReset, ansiYellow, msg, ansiReset)
+	line := fmt.Sprintf("%s%-10s%s %s%s%s\n", ansiGray, time.Now().Format("15:04:05"), ansiReset, ansiYellow, TerminalSafe(msg), ansiReset)
 
 	terminalUIMu.RLock()
 	ui := activeTerminalUI
@@ -153,14 +153,15 @@ func writeRequestLine(out *strings.Builder, req terminalRequestLine) {
 		statusColor = ansiGreen
 	}
 
+	// Method and path come from visitors; escape control characters.
 	pathWidth := requestPathColumnWidth(req)
-	displayPath := truncateDisplayPath(req.Path, pathWidth)
+	displayPath := truncateDisplayPath(TerminalSafe(req.Path), pathWidth)
 	fmt.Fprintf(
 		out,
 		"%s%-10s %-7s%s %s%-*s%s %s%d %s%s",
 		ansiGray,
 		req.Time.Format("15:04:05"),
-		req.Method,
+		TerminalSafe(req.Method),
 		ansiReset,
 		ansiBold+ansiWhite,
 		pathWidth,
@@ -177,8 +178,8 @@ func buildTerminalDashboard(cfg Config, resp registrationResponse, latency time.
 	var out strings.Builder
 	if cfg.Type == "share" {
 		fmt.Fprintf(&out, "%s%sGoPort Share%s\n\n", ansiBold, ansiWhite, ansiReset)
-		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Sharing", ansiReset, ansiBold+ansiWhite, cfg.ShareName, ansiReset)
-		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Public URL", ansiReset, ansiGreen, resp.URL, ansiReset)
+		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Sharing", ansiReset, ansiBold+ansiWhite, TerminalSafe(cfg.ShareName), ansiReset)
+		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Public URL", ansiReset, ansiGreen, TerminalSafe(resp.URL), ansiReset)
 		fmt.Fprintf(&out, "%s%-16s%s %sActive%s %s(%dms)%s\n", ansiGray, "Status", ansiReset, ansiGreen, ansiReset, ansiGray, latency.Milliseconds(), ansiReset)
 		if !cfg.ExpiresAt.IsZero() {
 			fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Expires", ansiReset, ansiBold+ansiWhite, cfg.ExpiresAt.Local().Format(time.RFC1123), ansiReset)
@@ -187,13 +188,17 @@ func buildTerminalDashboard(cfg Config, resp registrationResponse, latency time.
 		out.WriteString("Press Ctrl+C to stop sharing immediately.\n")
 		return out.String()
 	}
-	dashboardAddr := "http://127.0.0.1:" + strconv.Itoa(dashboardPort)
-	fmt.Fprintf(&out, "%s$%s %s%s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, commandLine(cfg), ansiReset)
+	fmt.Fprintf(&out, "%s$%s %s%s%s\n", ansiGray, ansiReset, ansiBold+ansiWhite, TerminalSafe(commandLine(cfg)), ansiReset)
 	out.WriteByte('\n')
-	fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, dashboardAddr, ansiReset)
+	if dashboardPort > 0 {
+		dashboardAddr := "http://127.0.0.1:" + strconv.Itoa(dashboardPort)
+		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiBold+ansiWhite, dashboardAddr, ansiReset)
+	} else {
+		fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Dashboard", ansiReset, ansiGray, "off", ansiReset)
+	}
 	fmt.Fprintf(&out, "%s%-16s%s %s%s%s\n", ansiGray, "Region", ansiReset, ansiBold+ansiWhite, regionLabel(cfg.Region), ansiReset)
 	fmt.Fprintf(&out, "%s%-16s%s %sonline%s %s(%dms)%s\n", ansiGray, "Status", ansiReset, ansiGreen, ansiReset, ansiGray, latency.Milliseconds(), ansiReset)
-	fmt.Fprintf(&out, "%s%-16s%s %s%s%s %s->%s %s%slocalhost:%s%s\n", ansiGray, "Forwarding", ansiReset, ansiGreen, resp.URL, ansiReset, ansiGray, ansiReset, ansiBold, ansiWhite, cfg.Port, ansiReset)
+	fmt.Fprintf(&out, "%s%-16s%s %s%s%s %s->%s %s%slocalhost:%s%s\n", ansiGray, "Forwarding", ansiReset, ansiGreen, TerminalSafe(resp.URL), ansiReset, ansiGray, ansiReset, ansiBold, ansiWhite, cfg.Port, ansiReset)
 	out.WriteByte('\n')
 
 	if cfg.Type == "http" {
@@ -221,15 +226,18 @@ func requestPathColumnWidth(req terminalRequestLine) int {
 	return pathWidth
 }
 
+// truncateDisplayPath shortens path to width runes, never splitting a UTF-8
+// sequence.
 func truncateDisplayPath(path string, width int) string {
-	if len(path) <= width {
+	runes := []rune(path)
+	if len(runes) <= width {
 		return path
 	}
 	if width <= 1 {
 		return "."
 	}
 	if width <= 3 {
-		return path[:width-1] + "."
+		return string(runes[:width-1]) + "."
 	}
-	return path[:width-3] + "..."
+	return string(runes[:width-3]) + "..."
 }

@@ -15,6 +15,7 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() {
+	tunnel.SetupTerminal()
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

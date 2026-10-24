@@ -22,10 +22,17 @@ type CapturedRequest struct {
 	ReqBody    string            `json:"reqBody"`
 	ResHeaders map[string]string `json:"resHeaders"`
 	ResBody    string            `json:"resBody"`
+	// ReqTruncated is set when only the start of the request body was kept,
+	// so the request can't be replayed exactly.
+	ReqTruncated bool `json:"reqTruncated,omitempty"`
 }
 
 // requestStore is a thread-safe ring buffer of captured requests with
 // pub/sub support so the dashboard can stream new entries in real time.
+//
+// Subscriber channels are never closed: Add may run at any moment, and a send
+// on a closed channel panics and kills the CLI. Unsubscribe just drops the
+// channel; the SSE handler stops on its request context.
 type requestStore struct {
 	mu          sync.RWMutex
 	items       []*CapturedRequest
@@ -50,19 +57,15 @@ func (s *requestStore) Add(r *CapturedRequest) {
 		s.items = s.items[len(s.items)-s.cap:]
 	}
 	s.totalCount++
-	subs := make([]chan *CapturedRequest, 0, len(s.subscribers))
+	// Non-blocking fan-out under the lock, so a slow subscriber doesn't stall
+	// request handling and nothing is sent after Unsubscribe returns.
 	for ch := range s.subscribers {
-		subs = append(subs, ch)
-	}
-	s.mu.Unlock()
-
-	// Non-blocking fan-out so a slow subscriber doesn't stall request handling.
-	for _, ch := range subs {
 		select {
 		case ch <- r:
 		default:
 		}
 	}
+	s.mu.Unlock()
 }
 
 func (s *requestStore) List() []*CapturedRequest {
@@ -121,7 +124,6 @@ func (s *requestStore) Unsubscribe(ch chan *CapturedRequest) {
 	s.mu.Lock()
 	delete(s.subscribers, ch)
 	s.mu.Unlock()
-	close(ch)
 }
 
 func newRequestID() string {
@@ -144,12 +146,14 @@ func flattenHeaders(h http.Header) map[string]string {
 	return out
 }
 
-// truncateBody returns body data, capping at maxBodySize to keep memory bounded.
+// maxBodySize caps how much of each body the inspector keeps.
 const maxBodySize = 256 * 1024 // 256 KiB
+
+const truncatedMarker = "\n...[truncated]"
 
 func truncateBody(b []byte) string {
 	if len(b) <= maxBodySize {
 		return string(b)
 	}
-	return string(b[:maxBodySize]) + "\n...[truncated]"
+	return string(b[:maxBodySize]) + truncatedMarker
 }

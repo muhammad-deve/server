@@ -30,6 +30,10 @@ const (
 
 var errInterrupted = errors.New("interrupted")
 
+// errStoppedFromDashboard ends the CLI quietly: the owner stopped the tunnel
+// on the website, so reconnecting would undo that.
+var errStoppedFromDashboard = errors.New("tunnel stopped from the dashboard")
+
 // registrationError is the server refusing the tunnel, as opposed to the
 // network failing on the way.
 type registrationError struct{ msg string }
@@ -50,7 +54,16 @@ var permanentRegistrationErrors = []string{
 	"subdomain can only",
 	"is reserved",
 	"missing port",
+	"belongs to another account",
+	stoppedFromDashboardFragment,
 }
+
+const (
+	stoppedFromDashboardFragment = "stopped from the dashboard"
+	// rateLimitedFragment is a temporary refusal; the server asks for a minute.
+	rateLimitedFragment = "too many tunnel registrations"
+	rateLimitedDelay    = time.Minute
+)
 
 func (e *registrationError) permanent() bool {
 	msg := strings.ToLower(e.msg)
@@ -60,6 +73,14 @@ func (e *registrationError) permanent() bool {
 		}
 	}
 	return false
+}
+
+func (e *registrationError) stoppedFromDashboard() bool {
+	return strings.Contains(strings.ToLower(e.msg), stoppedFromDashboardFragment)
+}
+
+func (e *registrationError) rateLimited() bool {
+	return strings.Contains(strings.ToLower(e.msg), rateLimitedFragment)
 }
 
 // sessionConfig tolerates slow uplinks. yamux sends keepalive pings on the same
@@ -127,14 +148,16 @@ func register(cfg Config, resume, reconnectReason string) (net.Conn, registratio
 		conn.Close()
 		return nil, registrationResponse{}, fmt.Errorf("error reading tunnel response: %w", err)
 	}
+	// Server text is printed to the terminal, so escape control characters.
 	if resp.Error != "" {
 		conn.Close()
-		return nil, registrationResponse{}, &registrationError{msg: resp.Error}
+		return nil, registrationResponse{}, &registrationError{msg: TerminalSafe(resp.Error)}
 	}
 	if resp.URL == "" {
 		conn.Close()
 		return nil, registrationResponse{}, errors.New("server error: empty tunnel url")
 	}
+	resp.URL = TerminalSafe(resp.URL)
 	_ = conn.SetDeadline(time.Time{})
 
 	return &bufferedConn{Conn: conn, r: reader}, resp, nil
@@ -151,7 +174,7 @@ func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // serve runs one tunnel session until it ends. It returns nil when the user
 // stopped the CLI, and the reason the session died otherwise.
-func serve(conn net.Conn, cfg Config, state *dashboardState, interrupt <-chan os.Signal) error {
+func serve(conn net.Conn, cfg Config, local *localTarget, state *dashboardState, interrupt <-chan os.Signal) error {
 	defer conn.Close()
 
 	// Count every byte flowing through the tunnel (both directions, including
@@ -175,7 +198,7 @@ func serve(conn net.Conn, cfg Config, state *dashboardState, interrupt <-chan os
 				done <- err
 				return
 			}
-			go handleStream(stream, cfg.Port, state)
+			go handleStream(stream, local, state)
 		}
 	}()
 
@@ -218,8 +241,13 @@ func reconnect(cfg Config, previous registrationResponse, reason string, state *
 		}
 
 		var refused *registrationError
-		if errors.As(err, &refused) && refused.permanent() {
-			return nil, registrationResponse{}, err
+		if errors.As(err, &refused) {
+			if refused.stoppedFromDashboard() {
+				return nil, registrationResponse{}, errStoppedFromDashboard
+			}
+			if refused.permanent() {
+				return nil, registrationResponse{}, err
+			}
 		}
 
 		// Say it once per distinct error so an hour offline doesn't fill the
@@ -229,6 +257,9 @@ func reconnect(cfg Config, previous registrationResponse, reason string, state *
 			logNotice(fmt.Sprintf("Reconnect failed: %s. Still retrying...", msg))
 		}
 		delay = nextReconnectDelay(delay, time.Since(lostAt))
+		if refused != nil && refused.rateLimited() {
+			delay = max(delay, rateLimitedDelay)
+		}
 	}
 }
 
