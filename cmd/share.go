@@ -39,6 +39,7 @@ func init() {
 }
 
 func runShare(cmd *cobra.Command, args []string) error {
+	cmd.SilenceUsage = true
 	root, err := filepath.Abs(args[0])
 	if err != nil {
 		return fmt.Errorf("resolve shared folder: %w", err)

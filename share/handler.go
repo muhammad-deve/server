@@ -18,7 +18,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +29,15 @@ import (
 )
 
 const maxConcurrentTransfers = 8
+
+// invalidNameChars never appear in shared paths. ':' would select an NTFS data
+// stream; the others are wildcards or reserved characters on Windows.
+var invalidNameChars = func() string {
+	if runtime.GOOS == "windows" {
+		return `:*?"<>|`
+	}
+	return ":"
+}()
 
 type Config struct {
 	Root      string
@@ -46,6 +57,7 @@ type Handler struct {
 	preview      bool
 	cookieKey    []byte
 	transfers    chan struct{}
+	guard        *unlockGuard
 }
 
 type entry struct {
@@ -88,6 +100,7 @@ func New(cfg Config) (*Handler, error) {
 		root: root, name: filepath.Base(root), token: cfg.Token, prefix: "/s/" + cfg.Token,
 		passwordHash: passwordHash, expiresAt: cfg.ExpiresAt, preview: cfg.Preview,
 		cookieKey: key, transfers: make(chan struct{}, maxConcurrentTransfers),
+		guard: newUnlockGuard(),
 	}, nil
 }
 
@@ -150,11 +163,26 @@ func (h *Handler) unlock(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	visitor := visitorKey(r)
+	if wait, ok := h.guard.begin(visitor); !ok {
+		tooManyAttempts(w, wait)
+		return
+	}
 	var request struct {
 		Password string `json:"password"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
-	if json.NewDecoder(r.Body).Decode(&request) != nil || bcrypt.CompareHashAndPassword(h.passwordHash, []byte(request.Password)) != nil {
+	if json.NewDecoder(r.Body).Decode(&request) != nil {
+		h.guard.cancel(visitor)
+		http.Error(w, "Invalid request.", http.StatusBadRequest)
+		return
+	}
+	correct := bcrypt.CompareHashAndPassword(h.passwordHash, []byte(request.Password)) == nil
+	if wait := h.guard.finish(visitor, correct); !correct {
+		if wait > 0 {
+			tooManyAttempts(w, wait)
+			return
+		}
 		time.Sleep(150 * time.Millisecond)
 		http.Error(w, "Invalid password.", http.StatusUnauthorized)
 		return
@@ -165,6 +193,28 @@ func (h *Handler) unlock(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: "goport_share", Value: h.cookie(expires), Path: h.prefix, Expires: expires, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func tooManyAttempts(w http.ResponseWriter, wait time.Duration) {
+	seconds := int64((wait + time.Second - 1) / time.Second)
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	message := "Too many attempts. Try again in a moment."
+	switch {
+	case seconds > 3600:
+		message = "Too many wrong passwords. Try again in " + plural((seconds+3599)/3600, "hour") + "."
+	case seconds > 60:
+		message = "Too many wrong passwords. Try again in " + plural((seconds+59)/60, "minute") + "."
+	case seconds > 1:
+		message = "Too many wrong passwords. Try again in " + plural(seconds, "second") + "."
+	}
+	http.Error(w, message, http.StatusTooManyRequests)
+}
+
+func plural(n int64, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return strconv.FormatInt(n, 10) + " " + unit + "s"
 }
 
 func (h *Handler) cookie(expires time.Time) string {
@@ -195,8 +245,8 @@ func (h *Handler) validCookie(value string) bool {
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	rel, err := cleanRelative(r.URL.Query().Get("path"))
-	if err != nil || blockedPath(rel) {
+	rel, err := h.requestedPath(r)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -254,12 +304,12 @@ func (h *Handler) file(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.release()
-	rel, err := cleanRelative(r.URL.Query().Get("path"))
-	if err != nil || rel == "." || blockedPath(rel) {
+	rel, err := h.requestedPath(r)
+	if err != nil || rel == "." {
 		http.NotFound(w, r)
 		return
 	}
-	file, err := h.open(rel)
+	file, err := safeopen.OpenBeneath(h.root, filepath.FromSlash(rel))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -292,8 +342,8 @@ func (h *Handler) zip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.release()
-	rel, err := cleanRelative(r.URL.Query().Get("path"))
-	if err != nil || blockedPath(rel) {
+	rel, err := h.requestedPath(r)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -328,7 +378,11 @@ func (h *Handler) addDirectory(archive *zip.Writer, rel, zipPrefix string) error
 		child := path.Join(rel, item.Name())
 		archiveName := path.Join(zipPrefix, item.Name())
 		if item.IsDir() {
-			if err := h.addDirectory(archive, child, archiveName); err != nil {
+			real, err := h.resolve(child)
+			if err != nil {
+				continue
+			}
+			if err := h.addDirectory(archive, real, archiveName); err != nil {
 				return err
 			}
 			continue
@@ -378,39 +432,62 @@ func (h *Handler) acquire(w http.ResponseWriter, r *http.Request) bool {
 }
 func (h *Handler) release() { <-h.transfers }
 
-func (h *Handler) open(rel string) (*os.File, error) {
-	if rel == "." {
-		return os.Open(h.root)
+// requestedPath reads the "path" query parameter and returns the real path it
+// names under the root, with names as they are on disk.
+func (h *Handler) requestedPath(r *http.Request) (string, error) {
+	// Query().Get has already decoded the value; decoding again broke names
+	// with % in them.
+	rel, err := cleanRelative(r.URL.Query().Get("path"))
+	if err != nil || blockedPath(rel) {
+		return "", os.ErrNotExist
 	}
-	return safeopen.OpenBeneath(h.root, filepath.FromSlash(rel))
+	return h.resolve(rel)
 }
 
-func (h *Handler) openDirectory(rel string) (*os.File, error) {
-	if rel == "." {
-		return os.Open(h.root)
-	}
-	candidate := filepath.Join(h.root, filepath.FromSlash(rel))
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return nil, err
-	}
-	within, err := filepath.Rel(h.root, resolved)
-	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
-		return nil, os.ErrPermission
-	}
-	return os.Open(resolved)
-}
+// evalSymlinks is replaced in tests.
+var evalSymlinks = filepath.EvalSymlinks
 
-func cleanRelative(value string) (string, error) {
-	decoded, err := url.PathUnescape(value)
+// resolve maps a cleaned relative path to the file it names and checks the
+// blocklist against the real names. On Windows a visitor can reach .env as
+// ENV~1 (an 8.3 short name) or id_rsa as "id_rsa." (trailing dots are
+// dropped); EvalSymlinks returns the long names actually on disk.
+func (h *Handler) resolve(rel string) (string, error) {
+	if rel == "." {
+		return ".", nil
+	}
+	resolved, err := evalSymlinks(filepath.Join(h.root, filepath.FromSlash(rel)))
 	if err != nil {
 		return "", err
 	}
-	decoded = strings.ReplaceAll(decoded, "\\", "/")
-	if strings.ContainsRune(decoded, 0) || path.IsAbs(decoded) || filepath.VolumeName(decoded) != "" {
+	within, err := filepath.Rel(h.root, resolved)
+	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) || filepath.IsAbs(within) {
+		return "", os.ErrPermission
+	}
+	real := filepath.ToSlash(within)
+	if blockedPath(real) {
+		return "", os.ErrPermission
+	}
+	return real, nil
+}
+
+// openDirectory opens a directory by its resolved path (see resolve).
+func (h *Handler) openDirectory(real string) (*os.File, error) {
+	if real == "." {
+		return os.Open(h.root)
+	}
+	return os.Open(filepath.Join(h.root, filepath.FromSlash(real)))
+}
+
+func cleanRelative(value string) (string, error) {
+	value = strings.ReplaceAll(value, "\\", "/")
+	if strings.ContainsRune(value, 0) || path.IsAbs(value) || filepath.VolumeName(value) != "" {
 		return "", errors.New("invalid path")
 	}
-	clean := path.Clean(decoded)
+	// ':' selects an NTFS data stream (id_rsa::$DATA) on Windows.
+	if strings.ContainsAny(value, invalidNameChars) {
+		return "", errors.New("invalid path")
+	}
+	clean := path.Clean(value)
 	if clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", errors.New("invalid path")
 	}
@@ -429,6 +506,9 @@ func blockedPath(rel string) bool {
 	return false
 }
 func blockedName(name string) bool {
+	if strings.ContainsAny(name, invalidNameChars) {
+		return true
+	}
 	lower := strings.ToLower(strings.TrimSpace(name))
 	if strings.HasPrefix(lower, ".") {
 		return true
